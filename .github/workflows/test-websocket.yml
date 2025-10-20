@@ -37,6 +37,9 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        # Install quotient directly from GitHub
+        git clone https://${{ secrets.CLONE_QUOTIENT }}@github.com/trades-platform/quotient.git
+        pip install ./quotient
         pip install websockets
     
     - name: Configure remote server settings
