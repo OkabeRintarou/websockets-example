@@ -1,0 +1,115 @@
+name: WebSocket Server & Clients Test
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+  workflow_dispatch:
+    inputs:
+      client_count:
+        description: 'Number of clients to start'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  test-websocket:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install websockets
+    
+    - name: Start WebSocket Server
+      run: |
+        echo "启动 WebSocket Server..."
+        python server.py &
+        SERVER_PID=$!
+        echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+        echo "✅ Server started with PID: $SERVER_PID"
+        sleep 3
+    
+    - name: Start Multiple Clients
+      env:
+        CLIENT_COUNT: ${{ github.event.inputs.client_count || '3' }}
+      run: |
+        echo "启动 $CLIENT_COUNT 个 WebSocket Clients..."
+        CLIENT_PIDS=()
+        
+        for i in $(seq 1 $CLIENT_COUNT); do
+          echo "启动 Client #$i"
+          python client.py &
+          CLIENT_PID=$!
+          CLIENT_PIDS+=($CLIENT_PID)
+          echo "✅ Client #$i started with PID: $CLIENT_PID"
+          sleep 1
+        done
+        
+        # 保存所有 client PIDs
+        echo "CLIENT_PIDS=${CLIENT_PIDS[*]}" >> $GITHUB_ENV
+    
+    - name: Wait for connections
+      run: |
+        echo "等待所有客户端连接..."
+        sleep 5
+        echo "✅ 连接建立完成"
+    
+    - name: Run automated tests
+      run: |
+        echo "运行自动化测试..."
+        
+        # 检查进程是否还在运行
+        if ps -p $SERVER_PID > /dev/null; then
+          echo "✅ Server 运行正常 (PID: $SERVER_PID)"
+        else
+          echo "❌ Server 已停止"
+          exit 1
+        fi
+        
+        # 检查 client 进程
+        for pid in $CLIENT_PIDS; do
+          if ps -p $pid > /dev/null; then
+            echo "✅ Client 运行正常 (PID: $pid)"
+          else
+            echo "⚠️  Client 已停止 (PID: $pid)"
+          fi
+        done
+        
+        echo "✅ 测试完成"
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "清理进程..."
+        
+        # 停止所有 client
+        for pid in $CLIENT_PIDS; do
+          if ps -p $pid > /dev/null; then
+            echo "停止 Client (PID: $pid)"
+            kill $pid || true
+          fi
+        done
+        
+        # 停止 server
+        if ps -p $SERVER_PID > /dev/null; then
+          echo "停止 Server (PID: $SERVER_PID)"
+          kill $SERVER_PID || true
+        fi
+        
+        sleep 2
+        echo "✅ 清理完成"
