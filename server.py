@@ -293,15 +293,19 @@ class LoadBalancer:
         return client_id
     
     def _least_loaded(self, metrics: Dict[str, ClientMetrics]) -> str:
-        """最少负载策略（考虑权重和响应时间）"""
-        # 综合考虑权重和响应时间
+        """最少负载策略（考虑权重、响应时间和请求计数）"""
+        # 综合考虑权重、响应时间和请求计数
         def score(m: ClientMetrics) -> float:
+            # 请求计数惩罚：防止单个客户端被过度使用
+            request_count = len(m.recent_requests)
+            request_penalty = request_count * 0.1
             # 权重越高越好，响应时间越低越好
             time_factor = 1.0 / (1.0 + m.avg_response_time) if m.avg_response_time > 0 else 1.0
-            return m.weight * time_factor
+            # 综合得分：权重 * 时间因子 / (1 + 请求惩罚)
+            return m.weight * time_factor / (1.0 + request_penalty)
         
         return max(metrics.items(), key=lambda x: score(x[1]))[0]
-    
+
     def _weighted_random(self, metrics: Dict[str, ClientMetrics]) -> str:
         """加权随机策略"""
         import random
