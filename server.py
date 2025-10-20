@@ -17,9 +17,14 @@ from enum import Enum
 from websockets.server import serve, WebSocketServerProtocol
 import websockets
 
+import hashlib
+import secrets
+import json
+
 from message_protocol import (
     Message, MessageType, create_notification, 
-    create_response, create_error, create_heartbeat
+    create_response, create_error, create_heartbeat,
+    create_request
 )
 
 # 配置日志
@@ -328,12 +333,16 @@ class WebSocketServer:
         self, 
         host: str = "0.0.0.0", 
         port: int = 8765,
+        requester_port: int = 8766,  # Requester 端口
         lb_strategy: str = "least_loaded",
         cleanup_interval: int = 60  # 清理间隔（秒）
     ):
         self.host = host
         self.port = port
+        self.requester_port = requester_port
         self.clients: Dict[str, WebSocketServerProtocol] = {}
+        self.requester_connections: Dict[str, WebSocketServerProtocol] = {}  # Requester 客户端连接
+        self.requester_pending_requests: Dict[str, asyncio.Future] = {}  # Requester 待处理请求
         self.metrics: Dict[str, ClientMetrics] = {}
         self.load_balancer = LoadBalancer(strategy=lb_strategy)
         self.cleanup_interval = cleanup_interval
@@ -456,10 +465,22 @@ class WebSocketServer:
         await self.send_to_client(client_id, create_heartbeat())
     
     async def _handle_response(self, client_id: str, msg: Message):
-        """处理客户端响应"""
+        """处理客户端响应（Worker 的响应）"""
         request_id = msg.data.get("request_id")
         result = msg.data.get("result")
         success = msg.data.get("success", True)
+        
+        # 检查是否是 Requester 的代理请求
+        if request_id in self.requester_pending_requests:
+            future = self.requester_pending_requests[request_id]
+            if not future.done():
+                # 将响应传递给等待的 Requester
+                future.set_result({
+                    "success": success,
+                    "data": result,
+                    "error": None if success else str(result)
+                })
+                logger.debug(f"📨 转发 Worker {client_id} 响应给 Requester: {request_id}")
         
         # 计算响应时间
         if request_id in self.pending_requests:
@@ -567,8 +588,6 @@ class WebSocketServer:
         retries: int = 3
     ) -> Optional[dict]:
         """自动选择客户端发送请求（负载均衡）"""
-        from message_protocol import create_request
-        
         for attempt in range(retries):
             # 选择一个客户端
             client_id = self.load_balancer.select_client(self.metrics)
@@ -643,6 +662,166 @@ class WebSocketServer:
         finally:
             await self.unregister_client(client_id)
     
+    # ============ Requester 功能（请求代理）============
+    
+    async def handle_requester(self, ws: WebSocketServerProtocol):
+        """
+        处理 Requester 连接（请求客户端）
+        
+        Requester 发送请求 -> Server 转发给 Worker -> 返回响应给 Requester
+        """
+        requester_id = str(uuid.uuid4())[:8]
+        remote_addr = ws.remote_address
+        logger.info(f"🔵 Requester 连接: {requester_id} from {remote_addr}")
+        
+        self.requester_connections[requester_id] = ws
+        
+        try:
+            async for raw_message in ws:
+                try:
+                    # 解析 Requester 的请求
+                    message = json.loads(raw_message)
+                    request_id = message.get("request_id", str(uuid.uuid4()))
+                    command = message.get("command")
+                    data = message.get("data", {})
+                    
+                    logger.info(f"📨 Requester {requester_id} 请求: {command} [ID: {request_id}]")
+                    
+                    # 转发给 Worker（使用负载均衡）
+                    response = await self.proxy_to_worker(
+                        command=command,
+                        data=data,
+                        request_id=request_id
+                    )
+                    
+                    # 返回响应给 Requester
+                    await ws.send(json.dumps({
+                        "request_id": request_id,
+                        "success": response.get("success", False),
+                        "data": response.get("data"),
+                        "error": response.get("error"),
+                        "processed_by": response.get("worker_id")
+                    }))
+                    
+                    logger.info(f"✅ Requester {requester_id} 请求完成: {request_id}")
+                    
+                except json.JSONDecodeError:
+                    error_response = {
+                        "success": False,
+                        "error": "Invalid JSON format"
+                    }
+                    await ws.send(json.dumps(error_response))
+                    logger.warning(f"⚠️  Requester {requester_id} 发送了无效的 JSON")
+                    
+                except Exception as e:
+                    error_response = {
+                        "success": False,
+                        "error": str(e)
+                    }
+                    await ws.send(json.dumps(error_response))
+                    logger.error(f"❌ 处理 Requester {requester_id} 请求失败: {e}")
+        
+        except websockets.exceptions.ConnectionClosedOK:
+            logger.info(f"🔵 Requester {requester_id} 正常断开")
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.warning(f"🔵 Requester {requester_id} 异常断开: {e}")
+        except Exception as e:
+            logger.error(f"❌ Requester {requester_id} 错误: {e}")
+        finally:
+            if requester_id in self.requester_connections:
+                del self.requester_connections[requester_id]
+            logger.info(f"🔵 Requester {requester_id} 已清理")
+    
+    async def proxy_to_worker(
+        self, 
+        command: str, 
+        data: dict,
+        request_id: str,
+        timeout: float = 30.0
+    ) -> dict:
+        """
+        将 Requester 的请求代理转发给 Worker
+        
+        Args:
+            command: 命令名称
+            data: 请求数据
+            request_id: 请求ID
+            timeout: 超时时间
+            
+        Returns:
+            dict: 响应数据
+        """
+        # 选择一个 Worker
+        worker_id = self.load_balancer.select_client(self.metrics)
+        
+        if not worker_id:
+            return {
+                "success": False,
+                "error": "No available workers",
+                "data": None
+            }
+        
+        ws = self.clients.get(worker_id)
+        if not ws:
+            return {
+                "success": False,
+                "error": f"Worker {worker_id} not found",
+                "data": None
+            }
+        
+        try:
+            # 构建请求消息（使用现有的消息格式）
+            # create_request 使用 action 而不是 command
+            request_msg = Message(
+                msg_type=MessageType.REQUEST,
+                data={"action": command, "params": data},
+                msg_id=request_id  # 使用 Requester 的 request_id 作为消息 ID
+            )
+            
+            # 记录请求
+            self.pending_requests[request_id] = time.time()
+            
+            # 发送给 Worker
+            await ws.send(request_msg.to_json())
+            logger.debug(f"📤 转发请求 {request_id} 到 Worker {worker_id}: {command}")
+            
+            # 等待响应（通过 handle_response 处理）
+            # 创建一个 Future 来等待响应
+            future = asyncio.Future()
+            self.requester_pending_requests[request_id] = future
+            
+            try:
+                response = await asyncio.wait_for(future, timeout=timeout)
+                return {
+                    "success": response.get("success", True),
+                    "data": response.get("data"),
+                    "error": response.get("error"),
+                    "worker_id": worker_id
+                }
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️  Worker {worker_id} 响应超时: {request_id}")
+                return {
+                    "success": False,
+                    "error": "Worker response timeout",
+                    "data": None,
+                    "worker_id": worker_id
+                }
+            finally:
+                # 清理
+                if request_id in self.requester_pending_requests:
+                    del self.requester_pending_requests[request_id]
+                if request_id in self.pending_requests:
+                    del self.pending_requests[request_id]
+                    
+        except Exception as e:
+            logger.error(f"❌ 转发请求失败 {request_id}: {e}")
+            return {
+                "success": False,
+                "error": f"Proxy error: {str(e)}",
+                "data": None,
+                "worker_id": worker_id
+            }
+    
     # ============ 控制台 ============
     
     async def console(self):
@@ -700,7 +879,6 @@ class WebSocketServer:
                         action = args[1]
                         params = eval(args[2]) if len(args) > 2 else {}
                         
-                        from message_protocol import create_request
                         msg = create_request(action, params)
                         self.pending_requests[msg.msg_id] = time.time()
                         await self.send_to_client(client_id, msg)
@@ -753,7 +931,7 @@ class WebSocketServer:
     # ============ 启动服务器 ============
     
     async def start(self):
-        """启动服务器"""
+        """启动服务器（双端口：Worker + Requester）"""
         logger.info(
             f"服务器 v3 启动中 "
             f"[负载均衡: {self.load_balancer.strategy}, "
@@ -764,8 +942,10 @@ class WebSocketServer:
         cleanup_task = asyncio.create_task(self.cleanup_loop())
         
         try:
-            async with serve(self.handle_client, self.host, self.port):
-                logger.info(f"✓ 服务器已启动，监听 {self.host}:{self.port}")
+            # 同时启动两个 WebSocket 服务器
+            async with serve(self.handle_client, self.host, self.port) as worker_server,                        serve(self.handle_requester, self.host, self.requester_port) as requester_server:
+                logger.info(f"✓ Worker 服务器已启动，监听 {self.host}:{self.port}")
+                logger.info(f"✓ Requester API 已启动，监听 {self.host}:{self.requester_port}")
                 await self.console()
         finally:
             cleanup_task.cancel()
@@ -780,9 +960,10 @@ class WebSocketServer:
 async def main():
     server = WebSocketServer(
         host="0.0.0.0", 
-        port=8765,
+        port=8765,              # Worker 端口
+        requester_port=8766,    # Requester API 端口
         lb_strategy="least_loaded",
-        cleanup_interval=60  # 每60秒清理一次过期数据
+        cleanup_interval=60     # 每60秒清理一次过期数据
     )
     await server.start()
 
