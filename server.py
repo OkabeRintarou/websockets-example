@@ -930,7 +930,7 @@ class WebSocketServer:
     
     # ============ Start Server ============
     
-    async def start(self):
+    async def start(self, enable_console=False):
         """Start server (dual port: Worker + Requester)"""
         logger.info(
             f"Starting server "
@@ -947,7 +947,14 @@ class WebSocketServer:
                        serve(self.handle_requester, self.host, self.requester_port) as requester_server:
                 logger.info(f"✓ Worker server started, listening on {self.host}:{self.port}")
                 logger.info(f"✓ Requester API started, listening on {self.host}:{self.requester_port}")
-                await self.console()
+                
+                # Only start console if explicitly enabled
+                if enable_console:
+                    await self.console()
+                else:
+                    # Wait indefinitely without blocking the event loop
+                    while True:
+                        await asyncio.sleep(3600)  # Sleep for an hour, but allow interruption
         finally:
             cleanup_task.cancel()
             try:
@@ -969,6 +976,8 @@ async def main():
                         help='Worker port (default: 8765)')
     parser.add_argument('--requester-port', type=int, default=8766, 
                         help='Requester API port (default: 8766)')
+    parser.add_argument('--enable-console', action='store_true',
+                        help='Enable server console (default: disabled)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -978,6 +987,7 @@ async def main():
                   int(os.environ.get("WEBSOCKET_WORKER_PORT", "8765"))
     requester_port = args.requester_port if args.requester_port else \
                      int(os.environ.get("WEBSOCKET_REQUESTER_PORT", "8766"))
+    enable_console = args.enable_console
     
     logger.info(f"Using ports: worker_port={worker_port}, requester_port={requester_port}")
     
@@ -988,7 +998,7 @@ async def main():
         lb_strategy="least_loaded",
         cleanup_interval=60     # Clean up expired data every 60 seconds
     )
-    await server.start()
+    await server.start(enable_console)
 
 
 if __name__ == "__main__":
