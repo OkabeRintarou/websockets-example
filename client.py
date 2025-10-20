@@ -292,7 +292,28 @@ class WebSocketClient:
 # ============ 入口 ============
 
 async def main():
-    client = WebSocketClient(server_url="ws://localhost:8765")
+    import sys
+    import os
+    
+    # 优先级: 命令行参数 > 环境变量 > 默认值
+    if len(sys.argv) >= 3:
+        # 从命令行参数读取: python client.py <host> <port>
+        host = sys.argv[1]
+        port = sys.argv[2]
+        server_url = f"ws://{host}:{port}"
+        logger.info(f"使用命令行参数: {server_url}")
+    elif "WEBSOCKET_SERVER_HOST" in os.environ:
+        # 从环境变量读取
+        host = os.environ.get("WEBSOCKET_SERVER_HOST", "localhost")
+        port = os.environ.get("WEBSOCKET_SERVER_PORT", "8765")
+        server_url = f"ws://{host}:{port}"
+        logger.info(f"使用环境变量: {server_url}")
+    else:
+        # 使用默认值
+        server_url = "ws://localhost:8765"
+        logger.info(f"使用默认值: {server_url}")
+    
+    client = WebSocketClient(server_url=server_url)
     
     # 方式1: 仅保持连接，处理服务器请求
     await client.start(enable_console=False)

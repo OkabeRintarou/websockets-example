@@ -78,20 +78,33 @@ jobs:
     - name: Test server connectivity
       run: |
         echo "🔍 测试服务器连接: $SERVER_HOST:$SERVER_PORT"
-        timeout 5 bash -c "cat < /dev/null > /dev/tcp/$SERVER_HOST/$SERVER_PORT" 2>/dev/null && \
-          echo "✅ 服务器可访问" || \
-          echo "⚠️  无法连接 (测试将继续)"
-    
-    - name: Modify client configuration
-      run: |
-        echo "🔧 配置客户端: ws://$SERVER_HOST:$SERVER_PORT"
-        sed -i "s|uri = \"ws://[^\"]*\"|uri = \"ws://$SERVER_HOST:$SERVER_PORT\"|g" client.py
-        grep "uri = " client.py | head -1
+        python << 'PYEOF'
+        import socket
+        import sys
+        import os
+        
+        host = os.environ.get('SERVER_HOST', 'localhost')
+        port = int(os.environ.get('SERVER_PORT', '8765'))
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            
+            if result == 0:
+                print('✅ 服务器可访问')
+            else:
+                print('⚠️  无法连接到服务器')
+        except Exception as e:
+            print(f'⚠️  连接测试失败: {e}')
+        PYEOF
     
     - name: Start client
       run: |
         echo "🚀 启动客户端 (运行 3 小时)..."
-        python client.py &
+        echo "   连接到: ws://$SERVER_HOST:$SERVER_PORT"
+        python client.py $SERVER_HOST $SERVER_PORT &
         CLIENT_PID=$!
         echo "CLIENT_PID=$CLIENT_PID" >> $GITHUB_ENV
         echo "✅ Client PID: $CLIENT_PID"
@@ -102,8 +115,8 @@ jobs:
       run: |
         echo "⏱️  监控 3 小时 (每 5 分钟检查一次)..."
         
-        DURATION=10800  # 3 hours
-        INTERVAL=300    # 5 minutes
+        DURATION=10800
+        INTERVAL=300
         ELAPSED=0
         CHECK_COUNT=0
         
