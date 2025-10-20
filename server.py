@@ -494,6 +494,9 @@ class WebSocketServer:
                     f"✓ {client_id} responded successfully "
                     f"[{response_time*1000:.1f}ms]"
                 )
+                # Print detailed timing information for specific actions like get_market
+                if isinstance(result, dict) and result.get('action') == 'get_market':
+                    logger.info(f"📈 Market data request latency: {response_time*1000:.1f}ms")
             else:
                 self.metrics[client_id].record_error()
                 logger.warning(
@@ -751,6 +754,9 @@ class WebSocketServer:
         Returns:
             dict: Response data
         """
+        # Record start time for latency measurement
+        start_time = time.time()
+
         # Select a Worker
         worker_id = self.load_balancer.select_client(self.metrics)
         
@@ -779,12 +785,12 @@ class WebSocketServer:
             )
             
             # Record request
-            self.pending_requests[request_id] = time.time()
+            self.pending_requests[request_id] = start_time
             
             # Send to Worker
             await ws.send(request_msg.to_json())
             logger.debug(f"📤 Forward request {request_id} to Worker {worker_id}: {command}")
-            
+
             # Wait for response (handled by handle_response)
             # Create a Future to wait for response
             future = asyncio.Future()
@@ -792,6 +798,10 @@ class WebSocketServer:
             
             try:
                 response = await asyncio.wait_for(future, timeout=timeout)
+                # Calculate and log the latency
+                latency = (time.time() - start_time) * 1000  # Convert to milliseconds
+                logger.info(f"⏱️  Request {request_id} completed in {latency:.1f}ms (processed by {worker_id})")
+
                 return {
                     "success": response.get("success", True),
                     "data": response.get("data"),

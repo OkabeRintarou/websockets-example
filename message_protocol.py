@@ -52,7 +52,7 @@ class Message:
             "data": self.data,
             "msg_id": self.msg_id,
             "timestamp": self.timestamp
-        }, ensure_ascii=False)
+        }, ensure_ascii=False, separators=(',', ':'))
     
     @classmethod
     def from_json(cls, json_str: str) -> 'Message':
