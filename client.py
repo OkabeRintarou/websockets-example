@@ -1,21 +1,22 @@
 """
-改进版 WebSocket 客户端
-- 使用 JSON 消息协议
-- 消息处理器模式（易扩展）
-- 支持自动重连
+Improved WebSocket Client
+- Using JSON message protocol
+- Message handler pattern (easily extensible)
+- Supports automatic reconnection
 """
 import asyncio
 import logging
 from typing import Dict, Callable
 from datetime import datetime
 import websockets
+import kline
 
 from message_protocol import (
     Message, MessageType, create_request, 
     create_response, create_heartbeat
 )
 
-# 配置日志
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class WebSocketClient:
-    """WebSocket 客户端类"""
+    """WebSocket Client Class"""
     
     def __init__(self, server_url: str = "ws://localhost:8765"):
         self.server_url = server_url
@@ -33,7 +34,7 @@ class WebSocketClient:
         self.client_id = None
         self.running = False
         
-        # 消息处理器映射（核心扩展点）
+        # Message handler mapping (core extensibility point)
         self.handlers: Dict[MessageType, Callable] = {
             MessageType.NOTIFICATION: self._handle_notification,
             MessageType.REQUEST: self._handle_request,
@@ -41,60 +42,60 @@ class WebSocketClient:
             MessageType.ERROR: self._handle_error,
         }
         
-        # 请求处理器映射（处理服务器发来的请求）
+        # Request handler mapping (handles requests from server)
         self.request_handlers: Dict[str, Callable] = {
             "get_time": self._action_get_time,
             "get_system_info": self._action_get_system_info,
-            "execute_command": self._action_execute_command,
-            # 可轻松扩展新的 action
+            "get_market" : self._action_get_market,
+            # Easily extend new actions
         }
     
-    # ============ 消息处理核心 ============
+    # ============ Message Processing Core ============
     
     async def handle_message(self, raw_message: str):
-        """处理接收到的消息（根据消息类型分发）"""
+        """Process received messages (dispatch based on message type)"""
         try:
             msg = Message.from_json(raw_message)
-            logger.debug(f"收到消息: {msg.type}")
+            logger.debug(f"Message received: {msg.type}")
             
-            # 根据消息类型分发到对应处理器
+            # Dispatch to corresponding handler based on message type
             handler = self.handlers.get(msg.type)
             if handler:
                 await handler(msg)
             else:
-                logger.warning(f"未知消息类型: {msg.type}")
+                logger.warning(f"Unknown message type: {msg.type}")
         
         except ValueError as e:
-            logger.error(f"消息解析失败: {e}")
+            logger.error(f"Message parsing failed: {e}")
     
-    # ============ 具体消息处理器 ============
+    # ============ Specific Message Handlers ============
     
     async def _handle_notification(self, msg: Message):
-        """处理通知消息"""
-        title = msg.data.get("title", "通知")
+        """Handle notification messages"""
+        title = msg.data.get("title", "Notification")
         content = msg.data.get("content", "")
         level = msg.data.get("level", "info")
         
         logger.info(f"[{level.upper()}] {title}: {content}")
     
     async def _handle_heartbeat(self, msg: Message):
-        """处理心跳消息"""
-        logger.debug("收到服务器心跳")
+        """Handle heartbeat messages"""
+        logger.debug("Server heartbeat received")
     
     async def _handle_error(self, msg: Message):
-        """处理错误消息"""
-        error = msg.data.get("error", "未知错误")
+        """Handle error messages"""
+        error = msg.data.get("error", "Unknown error")
         code = msg.data.get("code", "")
-        logger.error(f"服务器错误 [{code}]: {error}")
+        logger.error(f"Server error [{code}]: {error}")
     
     async def _handle_request(self, msg: Message):
-        """处理服务器请求"""
+        """Handle server requests"""
         action = msg.data.get("action")
         params = msg.data.get("params", {})
         
-        logger.info(f"收到服务器请求: {action}")
+        logger.info(f"Server request received: {action}")
         
-        # 查找对应的 action 处理器
+        # Find corresponding action handler
         action_handler = self.request_handlers.get(action)
         if action_handler:
             result = await action_handler(params)
@@ -102,76 +103,238 @@ class WebSocketClient:
         else:
             response = create_response(
                 msg.msg_id,
-                f"不支持的 action: {action}",
+                f"Unsupported action: {action}",
                 success=False
             )
         
         await self.send(response)
-        logger.info(f"已响应请求: {action}")
+        logger.info(f"Request responded: {action}")
     
-    # ============ Action 处理器（可扩展） ============
+    # ============ Action Handlers (Extensible) ============
     
     async def _action_get_time(self, params: dict) -> str:
-        """获取客户端时间"""
+        """Get client time"""
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
+    async def _action_get_market(self, params: dict) -> dict:
+        """Get market data via HTTP request"""
+        
+        try:
+            # Use run_in_executor with None to automatically use the current event loop
+            # Pass the params dict to the request function
+            response_data = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                self._perform_market_request, 
+                params
+            )
+            return response_data
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def _perform_market_request(self, params: dict) -> dict:
+        """
+        Perform the actual market data request (runs in thread pool)
+        
+        Args:
+            params: All parameters passed to the action
+                   Required: symbol_type, period, start_date, end_date
+                   Optional: format_type, adjust
+            
+        Returns:
+            dict: Response data
+        """
+        
+        # Validate all parameters
+        validation_result = self._validate_market_params(params)
+        if not validation_result["success"]:
+            return validation_result
+        
+        # Extract validated parameters
+        validated_params = validation_result["data"]
+        symbol_type = validated_params['symbol_type']
+        code = validated_params['code']
+        period = validated_params['period']
+        start_datetime = validated_params['start_date']
+        end_datetime = validated_params['end_date']
+        format_type = validated_params['format_type']
+        adjust = validated_params['adjust']
+        
+        try:
+            json_data = kline.get_quotation(symbol_type, code, period, start_datetime, end_datetime, adjust)
+            return json_data
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def _validate_market_params(self, params: dict) -> dict:
+        """
+        Validate market data request parameters.
+        
+        Args:
+            params: Parameters to validate
+            
+        Returns:
+            dict: Validation result with success flag and validated data or error message
+        """
+        from datetime import datetime
+        
+        # Define valid values
+        VALID_SYMBOL_TYPES = ['stock', 'etf', 'futures', 'bond', 'fund', 'index']
+        VALID_PERIODS = [
+            '1', '5', '15', '30', '60', '120',  # 分钟级别
+            'daily', 'weekly', 'monthly'  # 大周期级别
+        ]
+        VALID_ADJUST = ['none', 'qfq', 'hfq']
+        
+        # Extract required parameters
+        symbol_type = params.get('symbol_type')
+        code = params.get('code')
+        period = params.get('period')
+        start_date = params.get('start_date')
+        end_date = params.get('end_date')
+        
+        # Extract optional parameters with defaults
+        format_type = params.get('format', 'json')
+        adjust = params.get('adjust', 'qfq')
+        
+        # Validate required parameters
+        if not symbol_type:
+            return {"success": False, "error": "Missing required parameter: symbol_type"}
+        
+        # Validate symbol_type
+        if symbol_type not in VALID_SYMBOL_TYPES:
+            return {"success": False, "error": f"Invalid symbol_type: {symbol_type}. Valid values are: {VALID_SYMBOL_TYPES}"}
+        
+        if not code:
+            return {"success": False, "error": "Missing required parameter: code"}
+
+        if not period:
+            return {"success": False, "error": "Missing required parameter: period"}
+            
+        # Validate period
+        if period not in VALID_PERIODS:
+            return {"success": False, "error": f"Invalid period: {period}. Valid values are: {VALID_PERIODS}"}
+            
+        if not start_date:
+            return {"success": False, "error": "Missing required parameter: start_date"}
+            
+        if not end_date:
+            return {"success": False, "error": "Missing required parameter: end_date"}
+        
+        # Validate adjust parameter
+        if adjust not in VALID_ADJUST:
+            return {"success": False, "error": f"Invalid adjust: {adjust}. Valid values are: {VALID_ADJUST}"}
+        
+        # Validate and parse date formats
+        try:
+            parsed_start_date = self._parse_datetime(start_date)
+        except ValueError as e:
+            return {"success": False, "error": f"Invalid start_date format: {str(e)}"}
+            
+        try:
+            parsed_end_date = self._parse_datetime(end_date)
+        except ValueError as e:
+            return {"success": False, "error": f"Invalid end_date format: {str(e)}"}
+        
+        # All validations passed - return validated and parsed parameters
+        validated_data = {
+            'symbol_type': symbol_type,
+            'code' : code,
+            'period': period,
+            'start_date': parsed_start_date,
+            'end_date': parsed_end_date,
+            'format_type': format_type,
+            'adjust': adjust
+        }
+        
+        return {"success": True, "data": validated_data}
+    
+    def _parse_datetime(self, date_string):
+        """
+        Parse datetime string to datetime object.
+        Supports both date-only and datetime formats.
+        
+        Args:
+            date_string (str): Date string in format 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'
+            
+        Returns:
+            datetime: Parsed datetime object or None if input is None
+        """
+        from datetime import datetime
+        
+        if not date_string:
+            return None
+
+        # Try parsing as datetime first (with time components)
+        try:
+            return datetime.strptime(date_string, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            pass
+
+        # Try parsing as date only (without time components)
+        try:
+            return datetime.strptime(date_string, '%Y-%m-%d')
+        except ValueError:
+            pass
+
+        # If neither format works, raise an error
+        raise ValueError(f"Invalid date format: {date_string}. Expected 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'")
+    
     async def _action_get_system_info(self, params: dict) -> dict:
-        """获取系统信息"""
+        """Get system information"""
         import platform
         import sys
+        import psutil
+        
+        # Get CPU information
+        cpu_count_physical = psutil.cpu_count(logical=False)
+        cpu_count_logical = psutil.cpu_count(logical=True)
+        
+        # Get memory information
+        memory = psutil.virtual_memory()
+        memory_total_gb = round(memory.total / (1024**3), 2)
         
         return {
             "platform": platform.system(),
             "platform_version": platform.version(),
             "python_version": sys.version,
             "machine": platform.machine(),
+            "cpu_count_physical": cpu_count_physical,
+            "cpu_count_logical": cpu_count_logical,
+            "memory_total_gb": memory_total_gb
         }
     
-    async def _action_execute_command(self, params: dict) -> dict:
-        """执行命令（示例：可根据需要实现）"""
-        command = params.get("command", "")
-        logger.info(f"收到命令执行请求: {command}")
-        
-        # 注意：实际应用中需要权限控制和安全检查
-        # 这里仅作示例
-        return {
-            "status": "received",
-            "command": command,
-            "note": "命令已接收，但未实际执行（安全考虑）"
-        }
-    
-    # ============ 发送消息 ============
+    # ============ Send Messages ============
     
     async def send(self, msg: Message):
-        """发送消息到服务器"""
+        """Send message to server"""
         if self.ws:
             try:
                 await self.ws.send(msg.to_json())
-                logger.debug(f"发送消息: {msg.type}")
+                logger.debug(f"Message sent: {msg.type}")
             except Exception as e:
-                logger.error(f"发送消息失败: {e}")
+                logger.error(f"Failed to send message: {e}")
     
     async def send_request(self, action: str, params: dict = None):
-        """发送请求到服务器"""
+        """Send request to server"""
         msg = create_request(action, params)
         await self.send(msg)
-        logger.info(f"发送请求: {action}")
+        logger.info(f"Request sent: {action}")
     
-    # ============ 心跳机制 ============
+    # ============ Heartbeat Mechanism ============
     
     async def heartbeat_loop(self, interval: int = 30):
-        """心跳循环"""
+        """Heartbeat loop"""
         while self.running:
             await asyncio.sleep(interval)
             if self.ws:
                 await self.send(create_heartbeat())
-                logger.debug("发送心跳")
+                logger.debug("Heartbeat sent")
     
-    # ============ 连接管理 ============
+    # ============ Connection Management ============
     
     async def connect(self):
-        """连接到服务器"""
-        logger.info(f"连接到服务器: {self.server_url}")
+        """Connect to server"""
+        logger.info(f"Connecting to server: {self.server_url}")
         
         try:
             self.ws = await websockets.connect(
@@ -180,13 +343,13 @@ class WebSocketClient:
                 ping_timeout=120
             )
             self.running = True
-            logger.info("✓ 已连接到服务器")
+            logger.info("✓ Connected to server")
             
-            # 启动心跳任务
+            # Start heartbeat task
             heartbeat_task = asyncio.create_task(self.heartbeat_loop())
             
             try:
-                # 持续接收消息
+                # Continuously receive messages
                 async for raw_message in self.ws:
                     await self.handle_message(raw_message)
             finally:
@@ -197,48 +360,48 @@ class WebSocketClient:
                     pass
         
         except websockets.exceptions.ConnectionRefusedError:
-            logger.error("连接失败: 服务器未启动或地址错误")
+            logger.error("Connection failed: Server not started or address error")
         except websockets.exceptions.ConnectionClosedOK:
-            logger.info("连接正常关闭")
+            logger.info("Connection closed normally")
         except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning(f"连接异常关闭: {e}")
+            logger.warning(f"Connection closed abnormally: {e}")
         except Exception as e:
-            logger.error(f"连接错误: {e}")
+            logger.error(f"Connection error: {e}")
         finally:
             self.running = False
             self.ws = None
     
     async def connect_with_retry(self, max_retries: int = -1, retry_interval: int = 10):
-        """带重连的连接"""
+        """Connection with reconnection"""
         retry_count = 0
         
         while max_retries < 0 or retry_count < max_retries:
             try:
                 await self.connect()
             except KeyboardInterrupt:
-                logger.info("用户中断连接")
+                logger.info("User interrupted connection")
                 break
             
             if max_retries >= 0:
                 retry_count += 1
                 if retry_count >= max_retries:
-                    logger.error(f"达到最大重连次数 {max_retries}")
+                    logger.error(f"Maximum reconnection attempts reached {max_retries}")
                     break
             
-            logger.info(f"将在 {retry_interval} 秒后重连...")
+            logger.info(f"Reconnecting in {retry_interval} seconds...")
             await asyncio.sleep(retry_interval)
     
-    # ============ 客户端控制台（可选） ============
+    # ============ Client Console (Optional) ============
     
     async def console(self):
-        """客户端控制台，用于手动发送请求"""
-        logger.info("客户端控制台已启动，输入 'help' 查看命令")
+        """Client console for manual request sending"""
+        logger.info("Client console started, type 'help' for commands")
         
         while self.running:
             try:
                 cmd = await asyncio.to_thread(
                     input,
-                    "\n[客户端] > "
+                    "\n[Client] > "
                 )
                 
                 if not cmd.strip():
@@ -248,10 +411,10 @@ class WebSocketClient:
                 command = parts[0].lower()
                 
                 if command == "help":
-                    print("\n可用命令:")
-                    print("  request <action> [params] - 发送请求到服务器")
-                    print("  quit - 断开连接")
-                    print("\n示例:")
+                    print("\nAvailable commands:")
+                    print("  request <action> [params] - Send request to server")
+                    print("  quit - Disconnect")
+                    print("\nExamples:")
                     print("  request get_time")
                     print("  request calculate {'a': 10, 'b': 20, 'op': '+'}")
                 
@@ -262,63 +425,63 @@ class WebSocketClient:
                     await self.send_request(action, params)
                 
                 elif command == "quit":
-                    logger.info("断开连接...")
+                    logger.info("Disconnecting...")
                     self.running = False
                     if self.ws:
                         await self.ws.close()
                     break
                 
                 else:
-                    print("未知命令，输入 'help' 查看帮助")
+                    print("Unknown command, type 'help' for help")
             
             except Exception as e:
-                logger.error(f"控制台错误: {e}")
+                logger.error(f"Console error: {e}")
     
-    # ============ 启动客户端 ============
+    # ============ Start Client ============
     
     async def start(self, enable_console: bool = False):
-        """启动客户端"""
+        """Start Client"""
         if enable_console:
-            # 同时启动连接和控制台
+            # Start both connection and console simultaneously
             await asyncio.gather(
                 self.connect_with_retry(),
                 self.console()
             )
         else:
-            # 仅启动连接（持续运行）
+            # Start connection only (continuous running)
             await self.connect_with_retry()
 
 
-# ============ 入口 ============
+# ============ Entry Point ============
 
 async def main():
     import sys
     import os
     
-    # 优先级: 命令行参数 > 环境变量 > 默认值
+    # Priority: Command line arguments > Environment variables > Default values
     if len(sys.argv) >= 3:
-        # 从命令行参数读取: python client.py <host> <port>
+        # Read from command line arguments: python client.py <host> <port>
         host = sys.argv[1]
         port = sys.argv[2]
         server_url = f"ws://{host}:{port}"
-        logger.info(f"使用命令行参数: {server_url}")
+        logger.info(f"Using command line arguments: {server_url}")
     elif "WEBSOCKET_SERVER_HOST" in os.environ:
-        # 从环境变量读取
+        # Read from environment variables
         host = os.environ.get("WEBSOCKET_SERVER_HOST", "localhost")
         port = os.environ.get("WEBSOCKET_SERVER_PORT", "8765")
         server_url = f"ws://{host}:{port}"
-        logger.info(f"使用环境变量: {server_url}")
+        logger.info(f"Using environment variables: {server_url}")
     else:
-        # 使用默认值
+        # Use default values
         server_url = "ws://localhost:8765"
-        logger.info(f"使用默认值: {server_url}")
+        logger.info(f"Using default values: {server_url}")
     
     client = WebSocketClient(server_url=server_url)
     
-    # 方式1: 仅保持连接，处理服务器请求
+    # Method 1: Maintain connection only, handle server requests
     await client.start(enable_console=False)
     
-    # 方式2: 启用控制台，可手动发送请求
+    # Method 2: Enable console, manually send requests
     # await client.start(enable_console=True)
 
 
@@ -326,4 +489,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n客户端已关闭")
+        logger.info("\nClient closed")
