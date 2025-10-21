@@ -18,12 +18,13 @@ on:
 
 jobs:
   test-websocket:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 200
     
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        os: [ubuntu-22.04, ubuntu-24.04, debian-stable, fedora-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
     
     steps:
     - name: Checkout code 📦
