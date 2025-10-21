@@ -952,9 +952,9 @@ class WebSocketServer:
         cleanup_task = asyncio.create_task(self.cleanup_loop())
         
         try:
-            # Start both WebSocket servers simultaneously
-            async with serve(self.handle_client, self.host, self.port) as worker_server, \
-                       serve(self.handle_requester, self.host, self.requester_port) as requester_server:
+            # Start both WebSocket servers simultaneously with increased max message size
+            async with serve(self.handle_client, self.host, self.port, max_size=5 * 1024 * 1024) as worker_server, \
+                       serve(self.handle_requester, self.host, self.requester_port, max_size=5 * 1024 * 1024) as requester_server:
                 logger.info(f"✓ Worker server started, listening on {self.host}:{self.port}")
                 logger.info(f"✓ Requester API started, listening on {self.host}:{self.requester_port}")
                 
@@ -1008,6 +1008,8 @@ async def main():
         lb_strategy="least_loaded",
         cleanup_interval=60     # Clean up expired data every 60 seconds
     )
+    
+    # Increase max message size for server as well
     await server.start(enable_console)
 
 

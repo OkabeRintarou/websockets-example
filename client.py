@@ -11,6 +11,8 @@ from datetime import datetime
 import websockets
 import kline
 import time
+import concurrent.futures
+import multiprocessing
 
 from message_protocol import (
     Message, MessageType, create_request, 
@@ -201,8 +203,13 @@ class WebSocketClient:
                 else:
                     processed_results.append(result)
             
+            # Log summary of results
+            success_count = sum(1 for r in processed_results if r.get("success", False))
+            logger.info(f"Processed {len(processed_results)} market requests: {success_count} succeeded, {len(processed_results) - success_count} failed")
+
             return processed_results
         except Exception as e:
+            logger.error(f"Error processing get_markets request: {e}")
             return [{"success": False, "error": str(e)} for _ in params]
 
     def _validate_market_params(self, params: dict) -> dict:
@@ -385,10 +392,12 @@ class WebSocketClient:
         logger.info(f"Connecting to server: {self.server_url}")
         
         try:
+            # Increase max message size to handle large market data responses
             self.ws = await websockets.connect(
                 self.server_url,
                 ping_interval=60,
-                ping_timeout=120
+                ping_timeout=120,
+                max_size=5 * 1024 * 1024  # 5MB max message size
             )
             self.running = True
             logger.info("✓ Connected to server")
@@ -505,8 +514,6 @@ class WebSocketClient:
 async def main():
     import sys
     import os
-    import concurrent.futures
-    import multiprocessing
     
     # Priority: Command line arguments > Environment variables > Default values
     if len(sys.argv) >= 3:
