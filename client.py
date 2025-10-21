@@ -10,6 +10,7 @@ from typing import Dict, Callable
 from datetime import datetime
 import websockets
 import kline
+import time
 
 from message_protocol import (
     Message, MessageType, create_request, 
@@ -47,6 +48,7 @@ class WebSocketClient:
             "get_time": self._action_get_time,
             "get_system_info": self._action_get_system_info,
             "get_market" : self._action_get_market,
+            "get_markets" : self._action_get_markets,
             # Easily extend new actions
         }
     
@@ -130,7 +132,7 @@ class WebSocketClient:
             return response_data
         except Exception as e:
             return {"success": False, "error": str(e)}
-    
+
     def _perform_market_request(self, params: dict) -> dict:
         """
         Perform the actual market data request (runs in thread pool)
@@ -160,11 +162,49 @@ class WebSocketClient:
         adjust = validated_params['adjust']
         
         try:
+            # Measure the time taken to execute kline.get_quotation
+            start_time = time.time()
             json_data = kline.get_quotation(symbol_type, code, period, start_datetime, end_datetime, adjust)
+            elapsed_time = time.time() - start_time
+            
+            # Log the execution time with period and success/failure information
+            success = json_data.get("success", False)
+            logger.info(f"kline.get_quotation for {code} (period: {period}) {'succeeded' if success else 'failed'} in {elapsed_time:.2f} seconds")
             return json_data
         except Exception as e:
+            logger.info(f"kline.get_quotation for {code} (period: {period}) failed with exception in {time.time() - start_time:.2f} seconds: {str(e)}")
             return {"success": False, "error": str(e)}
     
+    async def _action_get_markets(self, params: dict) -> list:
+        """Get multiple market data via HTTP requests
+        params: list of dicts, each dict is the same as get_market params
+        """
+        try:
+            # Create a list of coroutines for concurrent execution
+            tasks = []
+            for market_params in params:
+                task = asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self._perform_market_request,
+                    market_params
+                )
+                tasks.append(task)
+            
+            # Execute all requests concurrently with timeout
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results, handling exceptions
+            processed_results = []
+            for result in results:
+                if isinstance(result, Exception):
+                    processed_results.append({"success": False, "error": str(result)})
+                else:
+                    processed_results.append(result)
+            
+            return processed_results
+        except Exception as e:
+            return [{"success": False, "error": str(e)} for _ in params]
+
     def _validate_market_params(self, params: dict) -> dict:
         """
         Validate market data request parameters.
@@ -320,6 +360,14 @@ class WebSocketClient:
         await self.send(msg)
         logger.info(f"Request sent: {action}")
     
+    async def send_markets_request(self, markets_params: list):
+        """Send request for multiple markets to server
+        markets_params: list of dicts, each dict is the same as get_market params
+        """
+        msg = create_request("get_markets", markets_params)
+        await self.send(msg)
+        logger.info(f"Request sent: get_markets with {len(markets_params)} markets")
+    
     # ============ Heartbeat Mechanism ============
     
     async def heartbeat_loop(self, interval: int = 30):
@@ -457,6 +505,8 @@ class WebSocketClient:
 async def main():
     import sys
     import os
+    import concurrent.futures
+    import multiprocessing
     
     # Priority: Command line arguments > Environment variables > Default values
     if len(sys.argv) >= 3:
@@ -476,7 +526,18 @@ async def main():
         server_url = "ws://localhost:8765"
         logger.info(f"Using default values: {server_url}")
     
+    # Create client
     client = WebSocketClient(server_url=server_url)
+    
+    # Increase thread pool size based on CPU cores for better concurrent performance
+    cpu_count = multiprocessing.cpu_count()
+    # Use 4 times the CPU count, but at least 10 and at most 50
+    thread_count = max(10, min(50, cpu_count * 4))
+    
+    logger.info(f"System has {cpu_count} CPU cores, setting thread pool size to {thread_count}")
+    loop = asyncio.get_event_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=thread_count)
+    loop.set_default_executor(executor)
     
     # Method 1: Maintain connection only, handle server requests
     await client.start(enable_console=False)

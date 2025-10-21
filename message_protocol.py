@@ -1,6 +1,6 @@
 """
-WebSocket 消息协议定义
-支持自定义消息类型的扩展
+WebSocket Message Protocol
+Supports extensible message types
 """
 from typing import Dict, Any, Optional
 from enum import Enum
@@ -9,24 +9,24 @@ from datetime import datetime
 
 
 class MessageType(str, Enum):
-    """消息类型枚举"""
-    # 系统消息
-    CONNECT = "connect"           # 连接建立
-    DISCONNECT = "disconnect"     # 断开连接
-    HEARTBEAT = "heartbeat"       # 心跳
-    ERROR = "error"               # 错误消息
+    """Message Type Enumeration"""
+    # System messages
+    CONNECT = "connect"           # Connection established
+    DISCONNECT = "disconnect"     # Connection closed
+    HEARTBEAT = "heartbeat"       # Heartbeat
+    ERROR = "error"               # Error message
     
-    # 业务消息
-    REQUEST = "request"           # 服务器请求
-    RESPONSE = "response"         # 客户端响应
-    NOTIFICATION = "notification" # 通知消息
+    # Business messages
+    REQUEST = "request"           # Server request
+    RESPONSE = "response"         # Client response
+    NOTIFICATION = "notification" # Notification message
     
-    # 自定义消息（可扩展）
-    CUSTOM = "custom"             # 自定义消息
+    # Custom messages (extensible)
+    CUSTOM = "custom"             # Custom message
 
 
 class Message:
-    """标准消息格式"""
+    """Standard Message Format"""
     
     def __init__(
         self,
@@ -42,11 +42,11 @@ class Message:
     
     @staticmethod
     def _generate_id() -> str:
-        """生成唯一消息ID"""
+        """Generate unique message ID"""
         return f"msg_{int(datetime.now().timestamp() * 1000)}"
     
     def to_json(self) -> str:
-        """转换为JSON字符串"""
+        """Convert to JSON string"""
         return json.dumps({
             "type": self.type.value,
             "data": self.data,
@@ -56,7 +56,7 @@ class Message:
     
     @classmethod
     def from_json(cls, json_str: str) -> 'Message':
-        """从JSON字符串解析"""
+        """Parse from JSON string"""
         try:
             obj = json.loads(json_str)
             return cls(
@@ -72,10 +72,10 @@ class Message:
         return f"Message(type={self.type}, msg_id={self.msg_id}, data={self.data})"
 
 
-# ============ 便捷的消息构造函数 ============
+# ============ Message Creation Functions ============
 
 def create_request(action: str, params: Dict[str, Any] = None) -> Message:
-    """创建请求消息"""
+    """Create request message"""
     return Message(
         msg_type=MessageType.REQUEST,
         data={"action": action, "params": params or {}}
@@ -83,7 +83,7 @@ def create_request(action: str, params: Dict[str, Any] = None) -> Message:
 
 
 def create_response(request_id: str, result: Any, success: bool = True) -> Message:
-    """创建响应消息"""
+    """Create response message"""
     return Message(
         msg_type=MessageType.RESPONSE,
         data={
@@ -95,7 +95,7 @@ def create_response(request_id: str, result: Any, success: bool = True) -> Messa
 
 
 def create_notification(title: str, content: str, level: str = "info") -> Message:
-    """创建通知消息"""
+    """Create notification message"""
     return Message(
         msg_type=MessageType.NOTIFICATION,
         data={
@@ -107,7 +107,7 @@ def create_notification(title: str, content: str, level: str = "info") -> Messag
 
 
 def create_heartbeat() -> Message:
-    """创建心跳消息"""
+    """Create heartbeat message"""
     return Message(
         msg_type=MessageType.HEARTBEAT,
         data={}
@@ -115,7 +115,7 @@ def create_heartbeat() -> Message:
 
 
 def create_error(error_msg: str, error_code: str = None) -> Message:
-    """创建错误消息"""
+    """Create error message"""
     return Message(
         msg_type=MessageType.ERROR,
         data={
