@@ -26,61 +26,56 @@ jobs:
         python-version: ['3.9', '3.10', '3.11']
     
     steps:
-    - name: Checkout code
+    - name: Checkout code 📦
       uses: actions/checkout@v4
     
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python ${{ matrix.python-version }} 🐍
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
     
-    - name: Install dependencies
+    - name: Install dependencies ⚙️
       run: |
         python -m pip install --upgrade pip
-        # Install quotient directly from GitHub
         git clone https://${{ secrets.CLONE_QUOTIENT }}@github.com/trades-platform/quotient.git
         pip install ./quotient
         pip install websockets
     
-    - name: Configure remote server settings
+    - name: Configure remote server settings 🛠️
       env:
         INPUT_SERVER_HOST: ${{ github.event.inputs.server_host }}
         INPUT_SERVER_PORT: ${{ github.event.inputs.server_port }}
         SECRET_SERVER_HOST: ${{ secrets.WEBSOCKET_SERVER_HOST }}
         SECRET_SERVER_PORT: ${{ secrets.WEBSOCKET_SERVER_PORT }}
       run: |
-        # 优先级: Secrets > 手动输入 > 默认值
         if [ -n "$SECRET_SERVER_HOST" ]; then
           SERVER_HOST="$SECRET_SERVER_HOST"
-          echo "✅ 使用 Secret: WEBSOCKET_SERVER_HOST"
+          echo "✅ Using Secret: WEBSOCKET_SERVER_HOST"
         elif [ -n "$INPUT_SERVER_HOST" ]; then
           SERVER_HOST="$INPUT_SERVER_HOST"
-          echo "✅ 使用手动输入的 Host"
+          echo "✅ Using manual input Host"
         else
           SERVER_HOST="localhost"
-          echo "⚠️  使用默认 Host: localhost"
+          echo "⚠️  Using default Host: localhost"
         fi
         
         if [ -n "$SECRET_SERVER_PORT" ]; then
           SERVER_PORT="$SECRET_SERVER_PORT"
-          echo "✅ 使用 Secret: WEBSOCKET_SERVER_PORT"
+          echo "✅ Using Secret: WEBSOCKET_SERVER_PORT"
         elif [ -n "$INPUT_SERVER_PORT" ]; then
           SERVER_PORT="$INPUT_SERVER_PORT"
-          echo "✅ 使用手动输入的 Port"
+          echo "✅ Using manual input Port"
         else
           SERVER_PORT="8765"
-          echo "⚠️  使用默认 Port: 8765"
+          echo "⚠️  Using default Port: 8765"
         fi
         
         echo "SERVER_HOST=$SERVER_HOST" >> $GITHUB_ENV
         echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
-        
-        echo ""
-        echo "📋 配置: $SERVER_HOST:$SERVER_PORT"
     
-    - name: Test server connectivity
+    - name: Test server connectivity 🌐
       run: |
-        echo "🔍 测试服务器连接: $SERVER_HOST:$SERVER_PORT"
+        echo "🔍 Testing server connectivity: $SERVER_HOST:$SERVER_PORT"
         python << 'PYEOF'
         import socket
         import sys
@@ -96,56 +91,69 @@ jobs:
             sock.close()
             
             if result == 0:
-                print('✅ 服务器可访问')
+                print('✅ Server accessible')
             else:
-                print('⚠️  无法连接到服务器')
+                print('⚠️  Cannot connect to server')
         except Exception as e:
-            print(f'⚠️  连接测试失败: {e}')
+            print(f'⚠️  Connection test failed: {e}')
         PYEOF
     
-    - name: Start client
+    - name: Start client and monitor output 🚀
       run: |
-        echo "🚀 启动客户端 (运行 3 小时)..."
-        echo "   连接到: ws://$SERVER_HOST:$SERVER_PORT"
-        python client.py $SERVER_HOST $SERVER_PORT &
+        # Read test duration from GitHub Variables (in minutes), default to 5 minutes
+        TEST_DURATION_MINUTES=${{ vars.TEST_DURATION || '5' }}
+        TEST_DURATION=$((TEST_DURATION_MINUTES * 60))  # Convert to seconds
+        INTERVAL=60
+        ELAPSED=0
+        
+        echo "🚀 Starting client for ${TEST_DURATION_MINUTES} minutes (${TEST_DURATION} seconds)"
+        echo "🔗 Connecting to: ws://$SERVER_HOST:$SERVER_PORT"
+        
+        # Start client and save output to file
+        python client.py $SERVER_HOST $SERVER_PORT > client_output.log 2>&1 &
         CLIENT_PID=$!
         echo "CLIENT_PID=$CLIENT_PID" >> $GITHUB_ENV
-        echo "✅ Client PID: $CLIENT_PID"
-        echo "⏱️  将运行 3 小时 (10800 秒)"
-        sleep 5
-    
-    - name: Monitor client for 3 hours
-      run: |
-        echo "⏱️  监控 3 小时 (每 5 分钟检查一次)..."
+        echo "⏱️  Will run for ${TEST_DURATION_MINUTES} minutes"
         
-        DURATION=10800
-        INTERVAL=300
-        ELAPSED=0
-        CHECK_COUNT=0
+        # Start background tail process to continuously show output
+        tail -f client_output.log &
+        TAIL_PID=$!
         
-        while [ $ELAPSED -lt $DURATION ]; do
+        # Monitor client status
+        while [ $ELAPSED -lt $TEST_DURATION ]; do
           sleep $INTERVAL
           ELAPSED=$((ELAPSED + INTERVAL))
-          CHECK_COUNT=$((CHECK_COUNT + 1))
           
           HOURS=$((ELAPSED / 3600))
           MINUTES=$(((ELAPSED % 3600) / 60))
           
-          if ps -p $CLIENT_PID > /dev/null; then
-            echo "✅ [${CHECK_COUNT}] Client 运行中 - 已运行: ${HOURS}h ${MINUTES}m"
-          else
-            echo "❌ Client 已停止 - 运行时长: ${HOURS}h ${MINUTES}m"
+          if ! ps -p $CLIENT_PID > /dev/null; then
+            # Kill tail process
+            kill $TAIL_PID 2>/dev/null || true
+            echo "❌ Client stopped after ${HOURS}h ${MINUTES}m"
+            echo "📜 Final client output:"
+            cat client_output.log
             exit 1
           fi
+          
+          echo "✅ Client running for ${HOURS}h ${MINUTES}m"
         done
         
+        # Kill tail process and show final status
+        kill $TAIL_PID 2>/dev/null || true
         echo ""
-        echo "✅ 测试完成 - Client 成功运行 3 小时"
+        echo "✅ Test completed successfully after ${TEST_DURATION_MINUTES} minutes"
+        echo "📜 Complete client output:"
+        cat client_output.log
     
-    - name: Cleanup
+    - name: Cleanup 🧹
       if: always()
       run: |
         if ps -p $CLIENT_PID > /dev/null 2>&1; then
           kill $CLIENT_PID || true
-          echo "✅ Client 已停止"
+          echo "✅ Client stopped"
+        fi
+        if [ -f client_output.log ]; then
+          rm client_output.log
+          echo "🗑️  Log file cleaned up"
         fi
