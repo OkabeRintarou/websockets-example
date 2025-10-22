@@ -182,12 +182,10 @@ class WebSocketClient:
         Batch get market data for multiple symbols
         
         Args:
-            params: {
-                "markets": [
-                    {"symbol_type": "etf", "code": "588000", ...},
-                    ...
-                ]
-            }
+            params: [
+                {"symbol_type": "etf", "code": "588000", ...},
+                ...
+            ]
         
         Returns:
             dict with results, summary, etc.
@@ -195,10 +193,21 @@ class WebSocketClient:
         import json
         logger.info(f"🔵 _action_get_markets called")
         logger.info(f"🔵 params type: {type(params)}")
-        logger.info(f"🔵 params keys: {params.keys() if isinstance(params, dict) else 'Not a dict'}")
-        logger.info(f"🔵 params content: {json.dumps(params, indent=2, default=str)}")
-        
-        markets = params.get("markets", [])
+
+        # Handle both direct list and nested dict formats
+        if isinstance(params, dict) and "markets" in params:
+            markets = params["markets"]
+            logger.info("🔄 Using nested 'markets' format")
+        elif isinstance(params, list):
+            markets = params
+            logger.info("✅ Using direct list format")
+        else:
+            logger.warning("⚠️  Invalid parameter format")
+            return {
+                "success": False,
+                "error": "Parameters must be a list of market objects or a dict with 'markets' key containing a list",
+                "results": []
+            }
         
         if not markets:
             logger.warning("⚠️  No markets specified")
@@ -234,9 +243,10 @@ class WebSocketClient:
         
         for market_params, result in zip(markets, results):
             symbol = market_params.get("code", "UNKNOWN")
+            period = market_params.get("period", "UNKNOWN")
             
             if isinstance(result, Exception):
-                logger.error(f"  ❌ {symbol}: {result}")
+                logger.error(f"  ❌ {symbol} (period: {period}): {result}")
                 processed_results.append({
                     "symbol": symbol,
                     "success": False,
@@ -245,7 +255,7 @@ class WebSocketClient:
                 failed_count += 1
             else:
                 if result.get("success", True):
-                    logger.info(f"  ✅ {symbol}: Success")
+                    logger.info(f"  ✅ {symbol} (period: {period}): Success")
                     processed_results.append({
                         "symbol": symbol,
                         "success": True,
@@ -253,7 +263,7 @@ class WebSocketClient:
                     })
                     success_count += 1
                 else:
-                    logger.warning(f"  ❌ {symbol}: {result.get('error')}")
+                    logger.warning(f"  ❌ {symbol} (period: {period}): {result.get('error')}")
                     processed_results.append({
                         "symbol": symbol,
                         "success": False,

@@ -691,8 +691,18 @@ class WebSocketServer:
                     logger.info(f"📨 Requester {requester_id} request: {command} [ID: {request_id}]")
                     
                     # Special handling for get_markets: distribute across workers
-                    if command == "get_markets" and "markets" in data:
-                        markets = data.get("markets", [])
+                    if command == "get_markets":
+                        # Handle both direct list and nested dict formats
+                        if isinstance(data, dict) and "markets" in data:
+                            markets = data.get("markets", [])
+                            logger.info("🔄 Using nested 'markets' format")
+                        elif isinstance(data, list):
+                            markets = data
+                            logger.info("✅ Using direct list format")
+                        else:
+                            markets = []
+                            logger.warning("⚠️  Invalid markets format")
+                        
                         if isinstance(markets, list) and len(markets) > 1:
                             # Use distributed processing for multiple markets
                             response = await self.proxy_get_markets_distributed(
@@ -703,7 +713,7 @@ class WebSocketServer:
                             # Single market or invalid, use normal proxy
                             response = await self.proxy_to_worker(
                                 command=command,
-                                data=data,
+                                data=markets,  # Use direct list instead of wrapping in dict
                                 request_id=request_id
                             )
                     else:
@@ -787,7 +797,7 @@ class WebSocketServer:
         if not available_workers:
             # Fallback to single worker
             logger.warning("No healthy workers available, using fallback")
-            return await self.proxy_to_worker("get_markets", {"markets": markets}, request_id, timeout)
+            return await self.proxy_to_worker("get_markets", markets, request_id, timeout)
         
         num_workers = len(available_workers)
         logger.info(f"📊 Distributing {len(markets)} markets across {num_workers} workers")
@@ -835,7 +845,7 @@ class WebSocketServer:
             task = self._send_to_specific_worker(
                 worker_id=worker_id,
                 command="get_markets",
-                data={"markets": assigned_markets},
+                data=assigned_markets,  # Direct list instead of {"markets": assigned_markets}
                 request_id=sub_request_id,
                 timeout=timeout
             )

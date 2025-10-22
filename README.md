@@ -127,7 +127,7 @@ class MyClient(WebSocketClient):
 
 ### 2. 添加新的消息类型处理器
 
-```python
+```
 # 在 message_protocol.py 中添加新的消息类型
 class MessageType(str, Enum):
     # ... 现有类型 ...
@@ -156,7 +156,30 @@ async def _handle_my_type(self, msg: Message):
 
 - `get_time` - 获取客户端时间
 - `get_system_info` - 获取系统信息
-- `execute_command` - 执行命令（示例，未实际执行）
+- `get_market` - 获取市场数据
+  ```python
+  params = {
+    "symbol_type": "etf",
+    "code": "562500",
+    "period": "daily",
+    "start_date": "2020-01-01",
+    "end_date": "2025-10-22",
+    "adjust": "qfq"
+  }
+  ```
+- `get_markets` - 批量获取市场数据
+  ```python
+  params = [
+    {
+      "symbol_type": "etf",
+      "code": "562500",
+      "period": "daily",
+      "start_date": "2020-01-01",
+      "end_date": "2025-10-22",
+      "adjust": "qfq"
+    }
+  ]
+  ```
 
 ## 使用示例
 
@@ -310,13 +333,71 @@ python requester_client.py localhost 8766
 {"success": true, "data": "2025-10-20 15:30:45", "processed_by": "abc123"}
 ```
 
-#### echo - 回显消息
+#### get_market - 获取单个市场数据
 ```json
 // 请求
-{"command": "echo", "data": {"message": "Hello World"}}
+{
+  "command": "get_market",
+  "data": {
+    "symbol_type": "etf",
+    "code": "562500",
+    "period": "daily",
+    "start_date": "2020-01-01",
+    "end_date": "2025-10-22",
+    "adjust": "qfq"
+  }
+}
 
 // 响应
-{"success": true, "data": "Echo: Hello World", "processed_by": "abc123"}
+{
+  "success": true,
+  "data": {
+    "success": true,
+    "code": "562500",
+    "name": "基金名称",
+    "data": [...]
+  },
+  "processed_by": "worker_id"
+}
+```
+
+#### get_markets - 批量获取市场数据
+```json
+// 请求
+{
+  "command": "get_markets",
+  "data": [
+    {
+      "symbol_type": "etf",
+      "code": "562500",
+      "period": "daily",
+      "start_date": "2020-01-01",
+      "end_date": "2025-10-22",
+      "adjust": "qfq"
+    }
+  ]
+}
+
+// 响应 (分布式处理)
+{
+  "success": true,
+  "data": {
+    "results": [
+      {
+        "success": true,
+        "code": "562500",
+        "name": "基金名称",
+        "data": [...]
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "success": 1,
+      "failed": 0
+    }
+  },
+  "processed_by": "distributed_1_workers"
+}
 ```
 
 ### Python 使用示例
@@ -398,3 +479,179 @@ server = WebSocketServer(
 3. **容错**: Worker 故障时自动切换
 4. **简单**: Requester 使用简单的 JSON API
 5. **扩展**: 可以轻松添加更多 Worker
+
+## 批量市场数据请求 (get_markets)（v3.2 新增）
+
+### 功能概述
+
+新增了批量市场数据请求功能，允许通过一个请求获取多个市场的数据。服务器支持分布式处理，可以将多个市场请求分发给不同的Worker处理，提高处理效率。
+
+### 使用示例
+
+#### 1. 运行批量市场数据请求示例
+```bash
+python get_markets_example.py
+```
+
+该示例会连接到Requester API，并发送包含多个ETF市场数据请求的批量请求。
+
+#### 2. 批量请求格式
+```json
+{
+  "request_id": "uuid-string",
+  "command": "get_markets",
+  "data": {
+    "markets": [
+      {
+        "symbol_type": "etf",
+        "code": "562500",
+        "period": "daily",
+        "start_date": "2015-01-01",
+        "end_date": "2025-10-22",
+        "adjust": "qfq"
+      },
+      {
+        "symbol_type": "etf",
+        "code": "159869",
+        "period": "weekly",
+        "start_date": "2015-01-01",
+        "end_date": "2025-10-22",
+        "adjust": "qfq"
+      }
+    ]
+  }
+}
+```
+
+### 响应格式
+
+#### 分布式处理响应
+```json
+{
+  "request_id": "uuid-string",
+  "success": true,
+  "data": {
+    "results": [
+      {
+        "success": true,
+        "code": "562500",
+        "name": "基金名称",
+        "data": [
+          {"date": "2025-01-01", "open": 100.0, "high": 110.0, "low": 99.0, "close": 105.0, "volume": 10000}
+        ]
+      }
+    ],
+    "summary": {
+      "total": 2,
+      "success": 2,
+      "failed": 0
+    },
+    "distributed": {
+      "workers_used": 2,
+      "elapsed_time": 1.23,
+      "errors": null
+    }
+  },
+  "error": null,
+  "processed_by": "distributed_2_workers"
+}
+```
+
+#### 非分布式处理响应（兼容旧格式）
+```json
+{
+  "request_id": "uuid-string",
+  "success": true,
+  "data": [
+    {
+      "success": true,
+      "code": "562500",
+      "name": "基金名称",
+      "data": [
+        {"date": "2025-01-01", "open": 100.0, "high": 110.0, "low": 99.0, "close": 105.0, "volume": 10000}
+      ]
+    }
+  ],
+  "error": null,
+  "processed_by": "worker_id"
+}
+```
+
+### Python 使用示例
+
+```
+import asyncio
+import websockets
+import json
+import uuid
+
+async def send_markets_request():
+    uri = "ws://localhost:8766"
+    async with websockets.connect(uri) as ws:
+        # 构建批量市场数据请求
+        markets = [
+            {
+                "symbol_type": "etf",
+                "code": "562500",
+                "period": "daily",
+                "start_date": "2020-01-01",
+                "end_date": "2025-10-22",
+                "adjust": "qfq"
+            },
+            {
+                "symbol_type": "etf",
+                "code": "159869",
+                "period": "weekly",
+                "start_date": "2020-01-01",
+                "end_date": "2025-10-22",
+                "adjust": "qfq"
+            }
+        ]
+        
+        request = {
+            "request_id": str(uuid.uuid4()),
+            "command": "get_markets",
+            "data": markets  # Direct list instead of {"markets": markets}
+        }
+        
+        # 发送请求
+        await ws.send(json.dumps(request))
+        
+        # 接收响应
+        response = await ws.recv()
+        result = json.loads(response)
+        
+        if result['success']:
+            print(f"请求成功，处理者: {result['processed_by']}")
+            data = result['data']
+            
+            # 处理分布式响应格式
+            if isinstance(data, dict) and 'results' in data:
+                results = data['results']
+                summary = data['summary']
+                print(f"总计: {summary['total']}, 成功: {summary['success']}, 失败: {summary['failed']}")
+            # 处理非分布式响应格式
+            else:
+                results = data if isinstance(data, list) else [data]
+                
+            for i, market_result in enumerate(results):
+                if market_result.get('success'):
+                    code = market_result.get('code')
+                    name = market_result.get('name')
+                    data_points = len(market_result.get('data', []))
+                    print(f"市场 {i+1}: {code} ({name}) - {data_points} 数据点")
+                else:
+                    print(f"市场 {i+1}: 失败 - {market_result.get('error', '未知错误')}")
+        else:
+            print(f"请求失败: {result['error']}")
+
+asyncio.run(send_markets_request())
+```
+
+### 特性
+
+1. **分布式处理**: 服务器会自动将多个市场请求分发给不同的Worker处理
+2. **智能分组**: 相同代码的市场数据请求会被分配给同一个Worker，提高缓存命中率
+3. **兼容性**: 同时支持分布式和非分布式响应格式，确保向后兼容
+4. **错误处理**: 详细记录每个市场请求的成功/失败状态
+5. **性能优化**: 并行处理多个市场请求，提高整体效率
