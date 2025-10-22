@@ -177,40 +177,101 @@ class WebSocketClient:
             logger.info(f"kline.get_quotation for {code} (period: {period}) failed with exception in {time.time() - start_time:.2f} seconds: {str(e)}")
             return {"success": False, "error": str(e)}
     
-    async def _action_get_markets(self, params: dict) -> list:
-        """Get multiple market data via HTTP requests
-        params: list of dicts, each dict is the same as get_market params
+    async def _action_get_markets(self, params: dict) -> dict:
         """
-        try:
-            # Create a list of coroutines for concurrent execution
-            tasks = []
-            for market_params in params:
-                task = asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self._perform_market_request,
-                    market_params
-                )
-                tasks.append(task)
+        Batch get market data for multiple symbols
+        
+        Args:
+            params: {
+                "markets": [
+                    {"symbol_type": "etf", "code": "588000", ...},
+                    ...
+                ]
+            }
+        
+        Returns:
+            dict with results, summary, etc.
+        """
+        import json
+        logger.info(f"🔵 _action_get_markets called")
+        logger.info(f"🔵 params type: {type(params)}")
+        logger.info(f"🔵 params keys: {params.keys() if isinstance(params, dict) else 'Not a dict'}")
+        logger.info(f"🔵 params content: {json.dumps(params, indent=2, default=str)}")
+        
+        markets = params.get("markets", [])
+        
+        if not markets:
+            logger.warning("⚠️  No markets specified")
+            return {
+                "success": False,
+                "error": "No markets specified",
+                "results": []
+            }
+        
+        if not isinstance(markets, list):
+            logger.warning(f"⚠️  markets is not a list: {type(markets)}")
+            return {
+                "success": False,
+                "error": "markets must be a list",
+                "results": []
+            }
+        
+        logger.info(f"📊 Batch querying {len(markets)} markets")
+        
+        # Create tasks
+        tasks = []
+        for market_params in markets:
+            task = self._action_get_market(market_params)
+            tasks.append(task)
+        
+        # Execute concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        processed_results = []
+        success_count = 0
+        failed_count = 0
+        
+        for market_params, result in zip(markets, results):
+            symbol = market_params.get("code", "UNKNOWN")
             
-            # Execute all requests concurrently with timeout
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process results, handling exceptions
-            processed_results = []
-            for result in results:
-                if isinstance(result, Exception):
-                    processed_results.append({"success": False, "error": str(result)})
+            if isinstance(result, Exception):
+                logger.error(f"  ❌ {symbol}: {result}")
+                processed_results.append({
+                    "symbol": symbol,
+                    "success": False,
+                    "error": str(result)
+                })
+                failed_count += 1
+            else:
+                if result.get("success", True):
+                    logger.info(f"  ✅ {symbol}: Success")
+                    processed_results.append({
+                        "symbol": symbol,
+                        "success": True,
+                        "data": result
+                    })
+                    success_count += 1
                 else:
-                    processed_results.append(result)
-            
-            # Log summary of results
-            success_count = sum(1 for r in processed_results if r.get("success", False))
-            logger.info(f"Processed {len(processed_results)} market requests: {success_count} succeeded, {len(processed_results) - success_count} failed")
-
-            return processed_results
-        except Exception as e:
-            logger.error(f"Error processing get_markets request: {e}")
-            return [{"success": False, "error": str(e)} for _ in params]
+                    logger.warning(f"  ❌ {symbol}: {result.get('error')}")
+                    processed_results.append({
+                        "symbol": symbol,
+                        "success": False,
+                        "error": result.get("error", "Unknown error")
+                    })
+                    failed_count += 1
+        
+        logger.info(f"✅ Completed: {success_count}/{len(markets)} successful")
+        
+        return {
+            "success": True,
+            "results": processed_results,
+            "summary": {
+                "total": len(markets),
+                "success": success_count,
+                "failed": failed_count
+            }
+        }
 
     def _validate_market_params(self, params: dict) -> dict:
         """

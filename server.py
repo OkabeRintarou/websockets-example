@@ -690,12 +690,29 @@ class WebSocketServer:
                     
                     logger.info(f"📨 Requester {requester_id} request: {command} [ID: {request_id}]")
                     
-                    # Forward to Worker (using load balancing)
-                    response = await self.proxy_to_worker(
-                        command=command,
-                        data=data,
-                        request_id=request_id
-                    )
+                    # Special handling for get_markets: distribute across workers
+                    if command == "get_markets" and "markets" in data:
+                        markets = data.get("markets", [])
+                        if isinstance(markets, list) and len(markets) > 1:
+                            # Use distributed processing for multiple markets
+                            response = await self.proxy_get_markets_distributed(
+                                markets=markets,
+                                request_id=request_id
+                            )
+                        else:
+                            # Single market or invalid, use normal proxy
+                            response = await self.proxy_to_worker(
+                                command=command,
+                                data=data,
+                                request_id=request_id
+                            )
+                    else:
+                        # Normal proxy for other commands
+                        response = await self.proxy_to_worker(
+                            command=command,
+                            data=data,
+                            request_id=request_id
+                        )
                     
                     # Return response to Requester
                     await ws.send(json.dumps({
@@ -735,12 +752,238 @@ class WebSocketServer:
                 del self.requester_connections[requester_id]
             logger.info(f"🔵 Requester {requester_id} cleaned up")
     
+    async def proxy_get_markets_distributed(
+        self,
+        markets: list,
+        request_id: str,
+        timeout: float = 10.0
+    ) -> dict:
+        """
+        Distribute get_markets request across multiple workers
+
+        Strategy:
+        1. Get available workers
+        2. Distribute markets evenly across workers
+        3. Group same code to same worker (for potential caching)
+           - Same code with different periods go to the same worker
+           - e.g., 588000 daily and 588000 5-min both go to worker1
+        4. Send requests in parallel
+        5. Merge results
+
+        Args:
+            markets: List of market params [{"code": "588000", "period": "daily", ...}, ...]
+            request_id: Original request ID
+            timeout: Timeout for each worker request
+            
+        Returns:
+            dict: Merged response with all results
+        """
+        # Get available workers
+        available_workers = [
+            cid for cid, metric in self.metrics.items()
+            if metric.status == ClientStatus.HEALTHY and cid in self.clients
+        ]
+        
+        if not available_workers:
+            # Fallback to single worker
+            logger.warning("No healthy workers available, using fallback")
+            return await self.proxy_to_worker("get_markets", {"markets": markets}, request_id, timeout)
+        
+        num_workers = len(available_workers)
+        logger.info(f"📊 Distributing {len(markets)} markets across {num_workers} workers")
+        
+        # Group markets by symbol for better caching
+        # If same symbol appears multiple times, send to same worker
+        symbol_to_worker = {}
+        worker_assignments = {worker_id: [] for worker_id in available_workers}
+        
+        # Distribute markets
+        for i, market in enumerate(markets):
+            # Use code as the grouping key (same code goes to same worker regardless of period)
+            code = market.get("code", f"unknown_{i}")
+            
+            # If we've seen this code before, use the same worker
+            if code in symbol_to_worker:
+                worker_id = symbol_to_worker[code]
+            else:
+                # Round-robin assignment for new codes
+                worker_id = available_workers[len(symbol_to_worker) % num_workers]
+                symbol_to_worker[code] = worker_id
+            
+            worker_assignments[worker_id].append(market)
+        
+        # Log distribution
+        for worker_id, assigned_markets in worker_assignments.items():
+            if assigned_markets:
+                codes = [m.get("code", "?") for m in assigned_markets]
+                logger.info(f"  Worker {worker_id}: {len(assigned_markets)} markets, codes: {codes}")
+        
+        # Send requests to workers in parallel
+        tasks = []
+        worker_ids = []
+        
+        for worker_id, assigned_markets in worker_assignments.items():
+            if not assigned_markets:
+                continue
+            
+            # Create unique sub-request ID
+            sub_request_id = f"{request_id}_sub_{worker_id}"
+            
+            logger.info(f"📤 Sending {len(assigned_markets)} markets to worker {worker_id}")
+            
+            # Create task for this specific worker (not using load balancer)
+            task = self._send_to_specific_worker(
+                worker_id=worker_id,
+                command="get_markets",
+                data={"markets": assigned_markets},
+                request_id=sub_request_id,
+                timeout=timeout
+            )
+            tasks.append(task)
+            worker_ids.append(worker_id)
+        
+        # Wait for all workers to respond
+        start_time = time.time()
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed = time.time() - start_time
+        
+        # Merge results
+        all_results = []
+        total_success = 0
+        total_failed = 0
+        errors = []
+        
+        for worker_id, response in zip(worker_ids, responses):
+            if isinstance(response, Exception):
+                logger.error(f"Worker {worker_id} failed: {response}")
+                errors.append(f"Worker {worker_id}: {str(response)}")
+                # Count as failed
+                assigned_count = len(worker_assignments[worker_id])
+                total_failed += assigned_count
+            elif not response.get("success"):
+                logger.error(f"Worker {worker_id} returned error: {response.get('error')}")
+                errors.append(f"Worker {worker_id}: {response.get('error')}")
+                assigned_count = len(worker_assignments[worker_id])
+                total_failed += assigned_count
+            else:
+                # Extract results from worker response
+                worker_data = response.get("data", {})
+                
+                if isinstance(worker_data, dict):
+                    results = worker_data.get("results", [])
+                    summary = worker_data.get("summary", {})
+                    
+                    all_results.extend(results)
+                    total_success += summary.get("success", 0)
+                    total_failed += summary.get("failed", 0)
+                    
+                    logger.debug(f"Worker {worker_id}: {summary.get('success')}/{summary.get('total')} successful")
+        
+        logger.info(
+            f"✅ Distributed query completed: {total_success}/{len(markets)} successful, "
+            f"elapsed {elapsed:.2f}s, "
+            f"used {len(worker_ids)} workers"
+        )
+        
+        return {
+            "success": True,
+            "data": {
+                "success": True,
+                "results": all_results,
+                "summary": {
+                    "total": len(markets),
+                    "success": total_success,
+                    "failed": total_failed
+                },
+                "distributed": {
+                    "workers_used": len(worker_ids),
+                    "elapsed_time": elapsed,
+                    "errors": errors if errors else None
+                }
+            },
+            "worker_id": f"distributed_{len(worker_ids)}_workers"
+        }
+    
+    async def _send_to_specific_worker(
+        self,
+        worker_id: str,
+        command: str,
+        data: dict,
+        request_id: str,
+        timeout: float = 10.0
+    ) -> dict:
+        """
+        Send request to a specific worker (bypass load balancer)
+        
+        Args:
+            worker_id: Target worker ID
+            command: Command name
+            data: Request data
+            request_id: Request ID
+            timeout: Timeout duration
+            
+        Returns:
+            dict: Response data
+        """
+        start_time = time.time()
+        
+        # Get the specific worker connection
+        ws = self.clients.get(worker_id)
+        if not ws:
+            logger.error(f"❌ Worker {worker_id} not found")
+            return {
+                "success": False,
+                "error": f"Worker {worker_id} not found",
+                "data": None
+            }
+        
+        try:
+            # Build request message
+            request_msg = Message(
+                msg_type=MessageType.REQUEST,
+                data={"action": command, "params": data},
+                msg_id=request_id
+            )
+            
+            # Record request
+            future = asyncio.Future()
+            self.requester_pending_requests[request_id] = future
+            
+            # Send request
+            await ws.send(request_msg.to_json())
+            logger.debug(f"📤 Sent to worker {worker_id}: {command} [ID: {request_id}]")
+            
+            # Wait for response
+            try:
+                response_data = await asyncio.wait_for(future, timeout=timeout)
+                elapsed = time.time() - start_time
+                logger.debug(f"✅ Worker {worker_id} responded in {elapsed:.3f}s")
+                return response_data
+            except asyncio.TimeoutError:
+                logger.error(f"⏱️ Timeout waiting for worker {worker_id}")
+                return {
+                    "success": False,
+                    "error": f"Timeout waiting for worker {worker_id}",
+                    "data": None
+                }
+        except Exception as e:
+            logger.error(f"❌ Error sending to worker {worker_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": None
+            }
+        finally:
+            # Cleanup
+            if request_id in self.requester_pending_requests:
+                del self.requester_pending_requests[request_id]
+    
     async def proxy_to_worker(
         self, 
         command: str, 
         data: dict,
         request_id: str,
-        timeout: float = 30.0
+        timeout: float = 10.0
     ) -> dict:
         """
         Proxy Requester's request to Worker
