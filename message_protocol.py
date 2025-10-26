@@ -15,6 +15,7 @@ class MessageType(str, Enum):
     DISCONNECT = "disconnect"     # Connection closed
     HEARTBEAT = "heartbeat"       # Heartbeat
     ERROR = "error"               # Error message
+    HANDSHAKE = "handshake"       # Handshake message
     
     # Business messages
     REQUEST = "request"           # Server request
@@ -122,4 +123,12 @@ def create_error(error_msg: str, error_code: str = None) -> Message:
             "error": error_msg,
             "code": error_code
         }
+    )
+
+
+def create_handshake(handshake_key: str = "deadbeafbeafdead") -> Message:
+    """Create handshake message"""
+    return Message(
+        msg_type=MessageType.HANDSHAKE,
+        data={"handshake_key": handshake_key}
     )

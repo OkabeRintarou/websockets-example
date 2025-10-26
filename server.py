@@ -335,7 +335,8 @@ class WebSocketServer:
         port: int = 8765,
         requester_port: int = 8766,  # Requester port
         lb_strategy: str = "least_loaded",
-        cleanup_interval: int = 60  # Cleanup interval (seconds)
+        cleanup_interval: int = 60,  # Cleanup interval (seconds)
+        handshake_key: str = "deadbeafbeafdead"  # Handshake key
     ):
         self.host = host
         self.port = port
@@ -346,6 +347,7 @@ class WebSocketServer:
         self.metrics: Dict[str, ClientMetrics] = {}
         self.load_balancer = LoadBalancer(strategy=lb_strategy)
         self.cleanup_interval = cleanup_interval
+        self.handshake_key = handshake_key  # Store the handshake key
         
         # Request tracking
         self.pending_requests: Dict[str, float] = {}
@@ -381,9 +383,8 @@ class WebSocketServer:
     
     # ============ Client Connection Management ============
     
-    async def register_client(self, ws: WebSocketServerProtocol) -> str:
+    async def register_client(self, client_id: str, ws: WebSocketServerProtocol):
         """Register new client"""
-        client_id = str(uuid.uuid4())[:8]
         self.clients[client_id] = ws
         
         # Get client connection information
@@ -412,7 +413,6 @@ class WebSocketServer:
             "info"
         )
         await ws.send(welcome_msg.to_json())
-        return client_id
     
     async def unregister_client(self, client_id: str):
         """Unregister client"""
@@ -650,20 +650,82 @@ class WebSocketServer:
     
     async def handle_client(self, ws: WebSocketServerProtocol):
         """Handle individual client connection"""
-        client_id = await self.register_client(ws)
+        # Generate client ID but don't register yet
+        client_id = str(uuid.uuid4())[:8]
+        
+        # Get client connection information early
+        remote_address = ws.remote_address  # (ip, port)
+        remote_ip = remote_address[0] if remote_address else "unknown"
+        remote_port = remote_address[1] if remote_address else 0
+        client_address = f"{remote_ip}:{remote_port}"
         
         try:
-            async for raw_message in ws:
-                await self.handle_message(client_id, raw_message)
+            # Wait for handshake message before registering client (with 5s timeout)
+            try:
+                raw_message = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"Client {client_id} [{client_address}] handshake timeout (5s)")
+                await ws.close()
+                return
+            
+            try:
+                msg = Message.from_json(raw_message)
+                # Check if it's a handshake message with the correct key
+                if msg.type == MessageType.HANDSHAKE:
+                    handshake_key = msg.data.get("handshake_key", "")
+                    if handshake_key == self.handshake_key:
+                        logger.info(f"Client {client_id} [{client_address}] handshake successful")
+                        
+                        # Now register the client
+                        await self.register_client(client_id, ws)
+                        
+                        # Send handshake confirmation
+                        confirmation_msg = create_notification(
+                            "Handshake Successful",
+                            "Connection established and client registered",
+                            "info"
+                        )
+                        await ws.send(confirmation_msg.to_json())
+                        
+                        # Continue processing messages
+                        async for raw_message in ws:
+                            await self.handle_message(client_id, raw_message)
+                    else:
+                        logger.warning(f"Client {client_id} [{client_address}] sent invalid handshake key")
+                        error_msg = create_error(
+                            "Invalid handshake",
+                            "HANDSHAKE_ERROR"
+                        )
+                        await ws.send(error_msg.to_json())
+                        await ws.close()
+                else:
+                    logger.warning(f"Client {client_id} [{client_address}] sent non-handshake message as first message")
+                    error_msg = create_error(
+                        "Invalid handshake",
+                        "HANDSHAKE_ERROR"
+                    )
+                    await ws.send(error_msg.to_json())
+                    await ws.close()
+                    
+            except ValueError as e:
+                logger.error(f"Invalid message format from client {client_id} [{client_address}]: {e}")
+                error_msg = create_error(
+                    "Invalid message format",
+                    "INVALID_FORMAT"
+                )
+                await ws.send(error_msg.to_json())
+                await ws.close()
         
         except websockets.exceptions.ConnectionClosedOK:
-            logger.info(f"Client {client_id} disconnected normally")
+            logger.info(f"Client {client_id} [{client_address}] disconnected normally")
         except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning(f"Client {client_id} disconnected abnormally: {e}")
+            logger.warning(f"Client {client_id} [{client_address}] disconnected abnormally: {e}")
         except Exception as e:
-            logger.error(f"Error handling client {client_id}: {e}")
+            logger.error(f"Error handling client {client_id} [{client_address}]: {e}")
         finally:
-            await self.unregister_client(client_id)
+            # Only unregister if client was registered
+            if client_id in self.clients:
+                await self.unregister_client(client_id)
     
     # ============ Requester Functionality (Request Proxy) ============
     
@@ -1241,6 +1303,8 @@ async def main():
                         help='Requester API port (default: 8766)')
     parser.add_argument('--enable-console', action='store_true',
                         help='Enable server console (default: disabled)')
+    parser.add_argument('--handshake-key', type=str, default='deadbeafbeafdead',
+                        help='Handshake key for client authentication (default: deadbeafbeafdead)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -1251,15 +1315,19 @@ async def main():
     requester_port = args.requester_port if args.requester_port else \
                      int(os.environ.get("WEBSOCKET_REQUESTER_PORT", "8766"))
     enable_console = args.enable_console
+    handshake_key = args.handshake_key if args.handshake_key else \
+                    os.environ.get("WEBSOCKET_HANDSHAKE_KEY", "deadbeafbeafdead")
     
     logger.info(f"Using ports: worker_port={worker_port}, requester_port={requester_port}")
+    logger.info(f"Using handshake key: {handshake_key}")
     
     server = WebSocketServer(
         host="0.0.0.0", 
         port=worker_port,              # Worker port
         requester_port=requester_port,    # Requester API port
         lb_strategy="least_loaded",
-        cleanup_interval=60     # Clean up expired data every 60 seconds
+        cleanup_interval=60,     # Clean up expired data every 60 seconds
+        handshake_key=handshake_key  # Handshake key
     )
     
     # Increase max message size for server as well

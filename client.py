@@ -16,7 +16,7 @@ import multiprocessing
 
 from message_protocol import (
     Message, MessageType, create_request, 
-    create_response, create_heartbeat
+    create_response, create_heartbeat, create_handshake
 )
 
 # Configure logging
@@ -31,11 +31,12 @@ logger = logging.getLogger(__name__)
 class WebSocketClient:
     """WebSocket Client Class"""
     
-    def __init__(self, server_url: str = "ws://localhost:8765"):
+    def __init__(self, server_url: str = "ws://localhost:8765", handshake_key: str = "deadbeafbeafdead"):
         self.server_url = server_url
         self.ws = None
         self.client_id = None
         self.running = False
+        self.handshake_key = handshake_key  # Store the handshake key
         
         # Message handler mapping (core extensibility point)
         self.handlers: Dict[MessageType, Callable] = {
@@ -473,6 +474,11 @@ class WebSocketClient:
             self.running = True
             logger.info("✓ Connected to server")
             
+            # Send handshake message immediately after connection
+            handshake_msg = create_handshake(self.handshake_key)
+            await self.send(handshake_msg)
+            logger.debug("Handshake message sent")
+            
             # Start heartbeat task
             heartbeat_task = asyncio.create_task(self.heartbeat_loop())
             
@@ -567,17 +573,17 @@ class WebSocketClient:
     
     # ============ Start Client ============
     
-    async def start(self, enable_console: bool = False):
+    async def start(self, enable_console: bool = False, max_retries: int = 10):
         """Start Client"""
         if enable_console:
             # Start both connection and console simultaneously
             await asyncio.gather(
-                self.connect_with_retry(),
+                self.connect_with_retry(max_retries=max_retries),
                 self.console()
             )
         else:
             # Start connection only (continuous running)
-            await self.connect_with_retry()
+            await self.connect_with_retry(max_retries=max_retries)
 
 
 # ============ Entry Point ============
@@ -585,12 +591,27 @@ class WebSocketClient:
 async def main():
     import sys
     import os
+    import argparse
+    
+    # Create argument parser
+    parser = argparse.ArgumentParser(description='WebSocket Client')
+    parser.add_argument('host', nargs='?', default='localhost',
+                        help='Server host (default: localhost)')
+    parser.add_argument('port', nargs='?', default='8765',
+                        help='Server port (default: 8765)')
+    parser.add_argument('--handshake-key', type=str, default='deadbeafbeafdead',
+                        help='Handshake key for server authentication (default: deadbeafbeafdead)')
+    parser.add_argument('--max-retries', type=int, default=10,
+                        help='Maximum number of reconnection attempts (default: 10, -1 for infinite)')
+    
+    # Parse arguments
+    args = parser.parse_args()
     
     # Priority: Command line arguments > Environment variables > Default values
-    if len(sys.argv) >= 3:
+    if args.host and args.port:
         # Read from command line arguments: python client.py <host> <port>
-        host = sys.argv[1]
-        port = sys.argv[2]
+        host = args.host
+        port = args.port
         server_url = f"ws://{host}:{port}"
         logger.info(f"Using command line arguments: {server_url}")
     elif "WEBSOCKET_SERVER_HOST" in os.environ:
@@ -604,8 +625,17 @@ async def main():
         server_url = "ws://localhost:8765"
         logger.info(f"Using default values: {server_url}")
     
+    handshake_key = args.handshake_key if args.handshake_key else \
+                    os.environ.get("WEBSOCKET_HANDSHAKE_KEY", "deadbeafbeafdead")
+    
+    max_retries = args.max_retries if args.max_retries else \
+                  int(os.environ.get("WEBSOCKET_MAX_RETRIES", "10"))
+    
+    logger.info(f"Using handshake key: {handshake_key}")
+    logger.info(f"Using max retries: {max_retries}")
+    
     # Create client
-    client = WebSocketClient(server_url=server_url)
+    client = WebSocketClient(server_url=server_url, handshake_key=handshake_key)
     
     # Increase thread pool size based on CPU cores for better concurrent performance
     cpu_count = multiprocessing.cpu_count()
@@ -618,10 +648,10 @@ async def main():
     loop.set_default_executor(executor)
     
     # Method 1: Maintain connection only, handle server requests
-    await client.start(enable_console=False)
+    await client.start(enable_console=False, max_retries=max_retries)
     
     # Method 2: Enable console, manually send requests
-    # await client.start(enable_console=True)
+    # await client.start(enable_console=True, max_retries=max_retries)
 
 
 if __name__ == "__main__":
