@@ -469,7 +469,8 @@ class WebSocketClient:
                 self.server_url,
                 ping_interval=60,
                 ping_timeout=120,
-                max_size=5 * 1024 * 1024  # 5MB max message size
+                max_size=5 * 1024 * 1024,  # 5MB max message size
+                close_timeout=10  # Set close timeout
             )
             self.running = True
             logger.info("✓ Connected to server")
@@ -486,6 +487,8 @@ class WebSocketClient:
                 # Continuously receive messages
                 async for raw_message in self.ws:
                     await self.handle_message(raw_message)
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"Connection closed: {e}")
             finally:
                 heartbeat_task.cancel()
                 try:
@@ -493,8 +496,9 @@ class WebSocketClient:
                 except asyncio.CancelledError:
                     pass
         
-        except websockets.exceptions.ConnectionRefusedError:
-            logger.error("Connection failed: Server not started or address error")
+        except OSError as e:
+            # Catch network connection errors, including DNS resolution errors
+            logger.error(f"Network error: {e}")
         except websockets.exceptions.ConnectionClosedOK:
             logger.info("Connection closed normally")
         except websockets.exceptions.ConnectionClosedError as e:
@@ -503,7 +507,12 @@ class WebSocketClient:
             logger.error(f"Connection error: {e}")
         finally:
             self.running = False
-            self.ws = None
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+                self.ws = None
     
     async def connect_with_retry(self, max_retries: int = -1, retry_interval: int = 10):
         """Connection with reconnection"""
