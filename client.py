@@ -9,10 +9,11 @@ import logging
 from typing import Dict, Callable
 from datetime import datetime
 import websockets
-import kline
 import time
 import concurrent.futures
 import multiprocessing
+import pandas as pd
+import kline
 
 from message_protocol import (
     Message, MessageType, create_request, 
@@ -127,11 +128,33 @@ class WebSocketClient:
         try:
             # Use run_in_executor with None to automatically use the current event loop
             # Pass the params dict to the request function
+            start_time = time.time()
             response_data = await asyncio.get_event_loop().run_in_executor(
                 None, 
                 self._perform_market_request, 
                 params
             )
+            elapsed_time = time.time() - start_time
+            
+            # Log the execution time
+            symbol = params.get('code', 'unknown')
+            period = params.get('period', 'unknown')
+            logger.info(f"Market request for {symbol} (period: {period}) completed in {elapsed_time:.2f} seconds")
+            
+            # If response is successful and contains data, try to convert to DataFrame and log time
+            if response_data.get("success") and "data" in response_data:
+                df_conversion_start = time.time()
+                try:
+                    # Try to convert to DataFrame
+                    data_list = response_data.get("data", [])
+                    if isinstance(data_list, list) and len(data_list) > 0:
+                        df = pd.DataFrame(data_list)
+                        df_conversion_time = time.time() - df_conversion_start
+                        logger.info(f"JSON to DataFrame conversion for {symbol} completed in {df_conversion_time:.4f} seconds, DataFrame shape: {df.shape}")
+                except Exception as e:
+                    df_conversion_time = time.time() - df_conversion_start
+                    logger.warning(f"Failed to convert JSON to DataFrame for {symbol} in {df_conversion_time:.4f} seconds: {e}")
+            
             return response_data
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -242,6 +265,10 @@ class WebSocketClient:
         success_count = 0
         failed_count = 0
         
+        # Track DataFrame conversion time for all markets
+        total_df_conversion_time = 0
+        df_conversion_count = 0
+        
         for market_params, result in zip(markets, results):
             symbol = market_params.get("code", "UNKNOWN")
             period = market_params.get("period", "UNKNOWN")
@@ -257,6 +284,23 @@ class WebSocketClient:
             else:
                 if result.get("success", True):
                     logger.info(f"  ✅ {symbol} (period: {period}): Success")
+                    
+                    # If result is successful, track DataFrame conversion time
+                    if "data" in result:
+                        df_conversion_start = time.time()
+                        try:
+                            # Try to convert to DataFrame
+                            data_list = result.get("data", [])
+                            if isinstance(data_list, list) and len(data_list) > 0:
+                                df = pd.DataFrame(data_list)
+                                df_conversion_time = time.time() - df_conversion_start
+                                total_df_conversion_time += df_conversion_time
+                                df_conversion_count += 1
+                                logger.debug(f"JSON to DataFrame conversion for {symbol} completed in {df_conversion_time:.4f} seconds, DataFrame shape: {df.shape}")
+                        except Exception as e:
+                            df_conversion_time = time.time() - df_conversion_start
+                            logger.warning(f"Failed to convert JSON to DataFrame for {symbol} in {df_conversion_time:.4f} seconds: {e}")
+                    
                     processed_results.append({
                         "symbol": symbol,
                         "success": True,
@@ -271,6 +315,11 @@ class WebSocketClient:
                         "error": result.get("error", "Unknown error")
                     })
                     failed_count += 1
+        
+        # Log average DataFrame conversion time
+        if df_conversion_count > 0:
+            avg_df_conversion_time = total_df_conversion_time / df_conversion_count
+            logger.info(f"📈 Average JSON to DataFrame conversion time: {avg_df_conversion_time:.4f} seconds across {df_conversion_count} successful conversions")
         
         logger.info(f"✅ Completed: {success_count}/{len(markets)} successful")
         
