@@ -105,17 +105,20 @@ class RequesterClient:
         }
         
         self.logger.info(f"Sending request [{request_id[:8]}]: {command}")
+        start_time = asyncio.get_event_loop().time()
         await self.ws.send(json.dumps(request))
         self.logger.debug(f"Request sent: {request}")
         
         # Wait for response
         self.logger.debug("Waiting for response...")
         response_raw = await self.ws.recv()
+        end_time = asyncio.get_event_loop().time()
+        elapsed_time = end_time - start_time
         self.logger.debug("Response received")
         response = json.loads(response_raw)
         
         if response.get("success"):
-            self.logger.info(f"Request succeeded [{request_id[:8]}]")
+            self.logger.info(f"Request succeeded [{request_id[:8]}] in {elapsed_time:.2f} seconds")
             self.logger.info(f"Processed by: {response.get('processed_by')}")
             # Only print result if it's small enough to avoid flooding the console
             result_data = response.get('data')
@@ -126,7 +129,7 @@ class RequesterClient:
             else:
                 self.logger.info(f"Result: {result_data}")
         else:
-            self.logger.error(f"Request failed [{request_id[:8]}]")
+            self.logger.error(f"Request failed [{request_id[:8]}] in {elapsed_time:.2f} seconds")
             self.logger.error(f"Error: {response.get('error')}")
         
         return response
@@ -137,8 +140,11 @@ class RequesterClient:
             raise Exception("Not connected. Call connect_sync() first.")
         self.logger.info(f"Sending synchronous request: {command}")
         try:
+            start_time = time.time()
             result = self._loop.run_until_complete(self.send_request(command, data))
-            self.logger.info("Synchronous request completed successfully")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            self.logger.info(f"Synchronous request completed in {elapsed_time:.2f} seconds")
             return result
         except Exception as e:
             self.logger.error(f"Failed to send request: {e}")
@@ -158,7 +164,12 @@ class RequesterClient:
         # Convert MarketParams objects to dictionaries
         markets_dict = [market.to_dict() for market in markets]
         self.logger.debug(f"Market parameters: {markets_dict}")
-        return await self.send_request("get_markets", {"markets": markets_dict})
+        start_time = asyncio.get_event_loop().time()
+        response = await self.send_request("get_markets", {"markets": markets_dict})
+        end_time = asyncio.get_event_loop().time()
+        elapsed_time = end_time - start_time
+        self.logger.info(f"get_markets request completed in {elapsed_time:.2f} seconds")
+        return response
     
     def get_markets_sync(self, markets: List[MarketParams]) -> dict:
         """Synchronous version of get_markets"""
@@ -166,8 +177,11 @@ class RequesterClient:
             raise Exception("Not connected. Call connect_sync() first.")
         self.logger.info(f"Requesting data for {len(markets)} markets (synchronous)")
         try:
+            start_time = time.time()
             result = self._loop.run_until_complete(self.get_markets(markets))
-            self.logger.info("Markets data request completed successfully")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            self.logger.info(f"Synchronous get_markets request completed in {elapsed_time:.2f} seconds")
             return result
         except Exception as e:
             self.logger.error(f"Failed to get markets: {e}")
@@ -270,7 +284,11 @@ class RequesterClient:
         self.logger.info(f"Requesting market data as DataFrame for single market: {market.code}")
         # Convert MarketParams object to dictionary
         market_dict = market.to_dict()
+        start_time = asyncio.get_event_loop().time()
         response = await self.send_request("get_market", market_dict)
+        end_time = asyncio.get_event_loop().time()
+        elapsed_time = end_time - start_time
+        self.logger.info(f"get_market request for {market.code} completed in {elapsed_time:.2f} seconds")
         
         if not response.get("success"):
             self.logger.error(f"Request for symbol {market.code} failed: {response.get('error')}")
@@ -308,8 +326,11 @@ class RequesterClient:
             raise Exception("Not connected. Call connect_sync() first.")
         self.logger.info(f"Requesting market data as DataFrame for single market: {market.code} (synchronous)")
         try:
+            start_time = time.time()
             result = self._loop.run_until_complete(self.get_market_as_dataframe(market))
-            self.logger.info("Single market data as DataFrame request completed")
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            self.logger.info(f"Synchronous get_market request for {market.code} completed in {elapsed_time:.2f} seconds")
             return result
         except Exception as e:
             self.logger.error(f"Failed to get market as DataFrame: {e}")
@@ -337,14 +358,6 @@ class RequesterClient:
 
 
 async def main():
-    # Get server address from command line arguments
-    if len(sys.argv) >= 3:
-        host = sys.argv[1]
-        port = sys.argv[2]
-        server_url = f"ws://{host}:{port}"
-    else:
-        server_url = "ws://localhost:8766"
-    
     # Configure logging for the main function
     logging.basicConfig(
         level=logging.INFO,
@@ -352,6 +365,15 @@ async def main():
         datefmt='%H:%M:%S'
     )
     main_logger = logging.getLogger(__name__)
+    
+    # Get server address from command line arguments
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
+    parser.add_argument("--port", default="8766", help="Server port (default: 8766)")
+    args = parser.parse_args()
+    
+    server_url = f"ws://{args.host}:{args.port}"
     
     client = RequesterClient(server_url, main_logger)
     
@@ -367,18 +389,46 @@ async def main():
         await asyncio.sleep(1)
         
         main_logger.info("="*50)
-        main_logger.info("Example 2: Market data test (single market as dict)")
+        main_logger.info("Example 2: Market data test (50 markets with different ETFs and periods)")
         main_logger.info("="*50)
-        # Example market data request
-        market_data = {
-            "symbol_type": "stock",
-            "code": "000001", 
-            "period": "daily",
-            "start_date": "2024-01-01",
-            "end_date": "2024-01-31",
-            "adjust": "qfq"
-        }
-        await client.send_request("get_market", market_data)
+        # Example market data request with 50 markets using specified ETF codes and different periods
+        etf_codes = ["588000", "159682", "513010", "588800"]
+        periods = ["1", "5", "15", "30", "60", "120", "daily", "weekly", "monthly"]
+        
+        # Use current date as end_date and one year ago as start_date
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        
+        # Format dates appropriately
+        end_date_str = end_date.strftime('%Y-%m-%d')
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        # Create 50 market requests
+        markets_data = []
+        for i in range(50):
+            etf_code = etf_codes[i % len(etf_codes)]
+            period = periods[i % len(periods)]
+            
+            # For minute-level periods, we need to specify time with seconds precision
+            if period in ["1", "5", "15", "30", "60", "120"]:
+                start_date_formatted = start_date_str + " 00:00:00"
+                end_date_formatted = end_date_str + " 23:59:59"
+            else:
+                start_date_formatted = start_date_str
+                end_date_formatted = end_date_str
+            
+            market_param = MarketParams(
+                symbol_type="etf",
+                code=etf_code,
+                period=period,
+                start_date=start_date_formatted,
+                end_date=end_date_formatted,
+                adjust="qfq"
+            )
+            markets_data.append(market_param)
+        
+        await client.get_markets(markets_data)
         
         await asyncio.sleep(1)
         
@@ -386,12 +436,13 @@ async def main():
         main_logger.info("Example 3: Market data test (single market as DataFrame)")
         main_logger.info("="*50)
         # Example market data request using MarketParams object and convert to DataFrame
+        # For minute-level periods, we need to specify time with seconds precision
         market_param = MarketParams(
-            symbol_type="stock",
-            code="000001",
+            symbol_type="etf",
+            code="588000",
             period="daily",
-            start_date="2024-01-01",
-            end_date="2024-01-31",
+            start_date=start_date_str,
+            end_date=end_date_str,
             adjust="qfq"
         )
         df = await client.get_market_as_dataframe(market_param)
@@ -402,50 +453,6 @@ async def main():
                 main_logger.info(df.head())
         else:
             main_logger.info("Failed to get market data")
-        
-        await asyncio.sleep(1)
-        
-        main_logger.info("="*50)
-        main_logger.info("Example 4: Multiple markets data test (as dict)")
-        main_logger.info("="*50)
-        # Example multiple markets data request using MarketParams objects
-        markets_data = [
-            MarketParams(
-                symbol_type="stock",
-                code="000001",
-                period="daily",
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                adjust="qfq"
-            ),
-            MarketParams(
-                symbol_type="etf",
-                code="510310",
-                period="daily",
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                adjust="qfq"
-            )
-        ]
-        await client.get_markets(markets_data)
-        
-        await asyncio.sleep(1)
-        
-        main_logger.info("="*50)
-        main_logger.info("Example 5: Multiple markets data test (as DataFrame)")
-        main_logger.info("="*50)
-        # Example multiple markets data request using MarketParams objects and convert to DataFrame
-        dataframes = await client.get_markets_as_dataframe(markets_data)
-        main_logger.info(f"Received {len(dataframes)} dataframes:")
-        for i, df in enumerate(dataframes):
-            symbol = markets_data[i].code
-            if df is not None:
-                main_logger.info(f"  {symbol}: {df.shape}")
-                if not df.empty:
-                    main_logger.info(f"    First 3 rows:")
-                    main_logger.info(df.head(3))
-            else:
-                main_logger.info(f"  {symbol}: None (request failed)")
     
     finally:
         await client.close()
@@ -453,14 +460,6 @@ async def main():
 
 def main_sync():
     """Synchronous version of main for demonstration"""
-    # Get server address from command line arguments
-    if len(sys.argv) >= 3:
-        host = sys.argv[1]
-        port = sys.argv[2]
-        server_url = f"ws://{host}:{port}"
-    else:
-        server_url = "ws://localhost:8766"
-    
     # Configure logging for the main function
     logging.basicConfig(
         level=logging.DEBUG,
@@ -468,6 +467,15 @@ def main_sync():
         datefmt='%H:%M:%S'
     )
     main_logger = logging.getLogger("requester_client.main")
+    
+    # Get server address from command line arguments
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
+    parser.add_argument("--port", default="8766", help="Server port (default: 8766)")
+    args = parser.parse_args()
+    
+    server_url = f"ws://{args.host}:{args.port}"
     
     main_logger.info("Starting synchronous requester client")
     client = RequesterClient(server_url, main_logger)
@@ -487,18 +495,46 @@ def main_sync():
         time.sleep(1)
         
         main_logger.info("="*50)
-        main_logger.info("Example 2: Market data test (single market as dict)")
+        main_logger.info("Example 2: Market data test (50 markets with different ETFs and periods)")
         main_logger.info("="*50)
-        # Example market data request
-        market_data = {
-            "symbol_type": "stock",
-            "code": "000001", 
-            "period": "daily",
-            "start_date": "2024-01-01",
-            "end_date": "2024-01-31",
-            "adjust": "qfq"
-        }
-        client.send_request_sync("get_market", market_data)
+        # Example market data request with 50 markets using specified ETF codes and different periods
+        etf_codes = ["588000", "159682", "513010", "588800"]
+        periods = ["1", "5", "15", "30", "60", "120", "daily", "weekly", "monthly"]
+        
+        # Use current date as end_date and one year ago as start_date
+        from datetime import datetime, timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        
+        # Format dates appropriately
+        end_date_str = end_date.strftime('%Y-%m-%d')
+        start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        # Create 50 market requests
+        markets_data = []
+        for i in range(50):
+            etf_code = etf_codes[i % len(etf_codes)]
+            period = periods[i % len(periods)]
+            
+            # For minute-level periods, we need to specify time with seconds precision
+            if period in ["1", "5", "15", "30", "60", "120"]:
+                start_date_formatted = start_date_str + " 00:00:00"
+                end_date_formatted = end_date_str + " 23:59:59"
+            else:
+                start_date_formatted = start_date_str
+                end_date_formatted = end_date_str
+            
+            market_param = MarketParams(
+                symbol_type="etf",
+                code=etf_code,
+                period=period,
+                start_date=start_date_formatted,
+                end_date=end_date_formatted,
+                adjust="qfq"
+            )
+            markets_data.append(market_param)
+        
+        client.get_markets_sync(markets_data)
         
         time.sleep(1)
         
@@ -506,12 +542,13 @@ def main_sync():
         main_logger.info("Example 3: Market data test (single market as DataFrame)")
         main_logger.info("="*50)
         # Example market data request using MarketParams object and convert to DataFrame
+        # For minute-level periods, we need to specify time with seconds precision
         market_param = MarketParams(
-            symbol_type="stock",
-            code="000001",
+            symbol_type="etf",
+            code="588000",
             period="daily",
-            start_date="2024-01-01",
-            end_date="2024-01-31",
+            start_date=start_date_str,
+            end_date=end_date_str,
             adjust="qfq"
         )
         df = client.get_market_as_dataframe_sync(market_param)
@@ -522,50 +559,6 @@ def main_sync():
                 main_logger.info(df.head())
         else:
             main_logger.info("Failed to get market data")
-        
-        time.sleep(1)
-        
-        main_logger.info("="*50)
-        main_logger.info("Example 4: Multiple markets data test (as dict)")
-        main_logger.info("="*50)
-        # Example multiple markets data request using MarketParams objects
-        markets_data = [
-            MarketParams(
-                symbol_type="stock",
-                code="000001",
-                period="daily",
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                adjust="qfq"
-            ),
-            MarketParams(
-                symbol_type="etf",
-                code="510310",
-                period="daily",
-                start_date="2024-01-01",
-                end_date="2024-01-31",
-                adjust="qfq"
-            )
-        ]
-        client.get_markets_sync(markets_data)
-        
-        time.sleep(1)
-        
-        main_logger.info("="*50)
-        main_logger.info("Example 5: Multiple markets data test (as DataFrame)")
-        main_logger.info("="*50)
-        # Example multiple markets data request using MarketParams objects and convert to DataFrame
-        dataframes = client.get_markets_as_dataframe_sync(markets_data)
-        main_logger.info(f"Received {len(dataframes)} dataframes:")
-        for i, df in enumerate(dataframes):
-            symbol = markets_data[i].code
-            if df is not None:
-                main_logger.info(f"  {symbol}: {df.shape}")
-                if not df.empty:
-                    main_logger.info(f"    First 3 rows:")
-                    main_logger.info(df.head(3))
-            else:
-                main_logger.info(f"  {symbol}: None (request failed)")
     
     except Exception as e:
         main_logger.error(f"Error in main_sync: {e}")
@@ -581,6 +574,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--sync", action="store_true", help="Run in synchronous mode")
+    parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
+    parser.add_argument("--port", default="8766", help="Server port (default: 8766)")
     args = parser.parse_args()
     
     try:
