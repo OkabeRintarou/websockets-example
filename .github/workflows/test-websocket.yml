@@ -15,11 +15,6 @@ on:
         description: 'Server Port (留空则使用 Secrets)'
         required: false
         type: string
-  schedule:
-    # 北京时间 9:20 (UTC 时间 1:20)
-    - cron: '20 1 * * *'
-    # 北京时间 11:10 (UTC 时间 3:10)
-    - cron: '10 3 * * *'
 
 jobs:
   test-websocket:
@@ -88,7 +83,7 @@ jobs:
         import os
         
         host = os.environ.get('SERVER_HOST', 'localhost')
-        port = int(os.environ.get('SERVER_PORT', '8765'))
+        port = int(os.environ.get('PORT', '8765'))
         
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
